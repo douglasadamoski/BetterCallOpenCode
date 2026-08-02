@@ -14,9 +14,8 @@ set -uo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$LIB_DIR/_bcoc_common.sh"
-bcoc_load_config_files
 
-die() { echo "$1" >&2; echo "RESULT=ERROR"; exit 1; }
+die() { echo "$1" >&2; echo "RESULT=BAD_ARGS"; exit 1; }
 need() { [[ -n "${2:-}" && "${2:0:1}" != "-" ]] || die "Missing value for $1"; }
 
 PROMPT_FILE=""; OUT_DIR=""; SCOPE="$(pwd)"; BACKEND="or-api"
@@ -44,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --sequential)  SEQUENTIAL=1; shift;;
     --retry-quota) RETRY_QUOTA=1; shift;;
     --allow-paid)  ALLOW_PAID=1; shift;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,11p' "$0" | sed -n 's/^# \{0,1\}//p'; echo "RESULT=OK"; exit 0;;
     *) die "Unknown arg: $1";;
   esac
 done
@@ -112,28 +111,66 @@ TS="$(bcoc_utc_ts)"
 } > "$INDEX"
 
 n=0
+declare -a CHILD_RESULTS=()
 for raw in "${ARR[@]}"; do
-  raw="$(echo "$raw" | xargs)"
+  # Pure-bash trim. `echo "$raw" | xargs` mangles values: a quote makes xargs error and
+  # silently drop the model, and a backslash is eaten.
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
   [[ -n "$raw" ]] || continue
   m="$(bcoc_normalize_model "$raw")"
   if ! bcoc_is_free_model "$m" && [[ "$ALLOW_PAID" -ne 1 ]]; then
     echo "| - | \`$m\` | PAID_BLOCKED | — |" >> "$INDEX"
+    CHILD_RESULTS+=("PAID_BLOCKED")
     continue
   fi
   n=$((n+1))
   safe="$(echo "$m" | tr '/:' '__')"
   out="$OUT_DIR/REVIEW_${n}_${safe}.md"
-  flags=(--prompt-file "$PROMPT_FILE" --out "$out" --scope "$SCOPE" --backend "$BACKEND" --model "$m" --cap "$CAP" --max-tokens "$MAX_TOKENS")
+  flags=(--prompt-file "$PROMPT_FILE" --out "$out" --scope "$SCOPE" --backend "$BACKEND"
+         --model "$m" --cap "$CAP" --max-tokens "$MAX_TOKENS"
+         --max-input-tokens "$MAX_INPUT" --timeout "$TIMEOUT")
   [[ "$ALLOW_PAID" -eq 1 ]] && flags+=(--allow-paid)
   echo "=== [$n] $m ===" >&2
-  set +e
-  bash "$LIB_DIR/opencode_review.sh" "${flags[@]}"
-  set -e
-  rline="$(grep -E '^\- \*\*RESULT:\*\*' "$out" 2>/dev/null | head -1 | sed 's/.*RESULT:\*\* //' || echo '?')"
+  # Read the child's RESULT from its own last stdout line — the contract — rather than
+  # scraping the report, which does not exist on the paths that matter most.
+  child_out="$(bash "$LIB_DIR/opencode_review.sh" "${flags[@]}")"
+  rline="$(printf '%s\n' "$child_out" | grep -E '^RESULT=' | tail -1 | cut -d= -f2)"
+  [[ -n "$rline" ]] || rline="ERROR"
+  CHILD_RESULTS+=("$rline")
   echo "| $n | \`$m\` | $rline | [\`$(basename "$out")\`]($(basename "$out")) |" >> "$INDEX"
   [[ $n -lt ${#ARR[@]} ]] && sleep "$SLEEP_S"
 done
-echo >> "$INDEX"
-echo "Claude: merge findings across reports." >> "$INDEX"
+
+# Aggregate honestly. This used to be an unconditional `echo "RESULT=OK"`, so a panel in
+# which EVERY model failed still reported OK — and Claude went on to triage reports that
+# contained no critique, defeating "on AUTH/CAP/QUOTA: STOP".
+usable=0
+worst=""
+for r in ${CHILD_RESULTS[@]+"${CHILD_RESULTS[@]}"}; do
+  case "$r" in
+    OK|TRUNCATED) usable=$((usable+1)) ;;
+    *) [[ -z "$worst" ]] && worst="$r" ;;
+  esac
+done
+total=${#CHILD_RESULTS[@]}
+{
+  echo
+  echo "Claude: merge findings across reports."
+  echo
+  echo "**$usable of $total models produced a usable review.**"
+} >> "$INDEX"
 echo "Index: $INDEX" >&2
-echo "RESULT=OK"
+
+if [[ "$total" -eq 0 ]]; then
+  echo "No models were run." >&2
+  echo "RESULT=BAD_ARGS"
+elif [[ "$usable" -eq 0 ]]; then
+  echo "Every model failed (first failure: ${worst:-ERROR}). Do NOT treat this as a review." >&2
+  echo "RESULT=${worst:-ERROR}"
+elif [[ "$usable" -lt "$total" ]]; then
+  echo "$usable/$total models produced a review." >&2
+  echo "RESULT=PARTIAL"
+else
+  echo "RESULT=OK"
+fi

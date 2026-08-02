@@ -165,7 +165,11 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | TIMEOUT | Smaller pack / stages; retry **once** |
 | PAID_BLOCKED | Switch to `:free` or get explicit paid consent |
 | REFUSED | A gate refused before spending anything (e.g. `--backend opencode` without `BCOPENCODE_UNSAFE_OPENCODE=1`). Read the stderr reason — **do not** work around it without telling the user what the gate protects |
-| UNREACHABLE / ERROR | Show report details; don't retry blindly |
+| BAD_ARGS | A bad argument or a failed pre-flight gate. **Nothing was spent** — fix the invocation and re-run freely |
+| UNREACHABLE | Never reached OpenRouter (DNS/network). Not billed. Check connectivity, retry **once** |
+| ERROR | A request was spent and came back unusable. Show report details; don't retry blindly |
+| INTERRUPTED | Ctrl-C / SIGTERM. The request was already launched, so it is **counted as billed** — the answer was lost, not the quota |
+| PARTIAL | Multi-model panel: some models failed. **Name which ones** in your summary — a merged critique missing N of M opinions is not a complete review |
 
 ## Report back
 
