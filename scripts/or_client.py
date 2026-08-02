@@ -199,7 +199,7 @@ def chat(
     api_key: str,
     model: str,
     messages: List[Dict[str, str]],
-    max_tokens: int = 8192,
+    max_tokens: int = 16384,
     temperature: float = 0.2,
     timeout: int = DEFAULT_TIMEOUT,
     allow_paid: bool = False,
@@ -212,13 +212,25 @@ def chat(
             "model": oc_form,
             "free": False,
         }
-    body = {
+    # Reasoning models (gpt-oss, some Nemotron, etc.) often count *thinking* against
+    # max_tokens. Cap internal reasoning so the completion budget is not all spent
+    # before any visible findings text. Override with BCOPENCODE_REASONING_MAX_TOKENS=0
+    # to leave provider defaults alone.
+    reasoning_max_raw = _env("BCOPENCODE_REASONING_MAX_TOKENS", "2048")
+    body: Dict[str, Any] = {
         "model": or_id,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "usage": {"include": True},
     }
+    try:
+        rmax = int(reasoning_max_raw)
+    except ValueError:
+        rmax = 2048
+    if rmax > 0:
+        # OpenRouter reasoning budget (ignored by models that do not support it).
+        body["reasoning"] = {"max_tokens": min(rmax, max(256, max_tokens // 4))}
     try:
         code, text, parsed = http_json(
             "POST",
@@ -254,36 +266,95 @@ def chat(
 
     choices = parsed.get("choices") or []
     content = ""
+    reasoning_text = ""
     finish = None
     if choices:
         ch0 = choices[0] or {}
         finish = ch0.get("finish_reason") or ch0.get("native_finish_reason")
         msg = ch0.get("message") or {}
-        content = msg.get("content") or ""
-        if not content and msg.get("reasoning"):
-            content = f"(reasoning only)\n{msg.get('reasoning')}"
+        content = _coerce_text(msg.get("content"))
+        reasoning_text = _coerce_text(msg.get("reasoning"))
+        if not reasoning_text:
+            reasoning_text = _reasoning_from_details(msg.get("reasoning_details"))
+        # Prefer assistant content; fall back to reasoning when the model spent the
+        # whole budget thinking (common on free reasoning models with low max_tokens).
+        if not content.strip() and reasoning_text.strip():
+            content = reasoning_text.strip()
     usage = parsed.get("usage") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = completion_details.get("reasoning_tokens")
     env = {
         "model": oc_form,
         "openrouter_model": parsed.get("model") or or_id,
         "free": free,
         "content": content or "",
         "finish_reason": finish,
+        "had_reasoning_fallback": bool(
+            reasoning_text.strip() and content.strip() == reasoning_text.strip()
+        ),
         "usage": {
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "cost": usage.get("cost"),
+            "reasoning_tokens": reasoning_tokens,
         },
         "id": parsed.get("id"),
+        "max_tokens_requested": max_tokens,
     }
-    if finish in ("length", "max_tokens") or (
-        content and len(content) < 20 and finish == "length"
-    ):
+    # Hit the completion ceiling — response may be incomplete. Still return the body
+    # we have so the report is usable; RESULT=TRUNCATED tells Claude not to treat it
+    # as a clean bill of health.
+    if finish in ("length", "max_tokens"):
+        if not (content or "").strip():
+            return "TRUNCATED", {
+                **env,
+                "error": (
+                    f"finish_reason={finish} with empty content (max_tokens={max_tokens}). "
+                    "Reasoning models often burn the budget on thinking — raise "
+                    "--max-tokens (default 16384) or set BCOPENCODE_REASONING_MAX_TOKENS."
+                ),
+            }
         return "TRUNCATED", env
     if not (content or "").strip():
         return "ERROR", {**env, "error": "empty content", "raw": parsed}
     return "OK", env
+
+
+def _coerce_text(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, list):
+        parts = []
+        for item in val:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(
+                    str(item.get("text") or item.get("content") or item.get("reasoning") or "")
+                )
+        return "".join(parts)
+    return str(val)
+
+
+def _reasoning_from_details(details: Any) -> str:
+    if not details:
+        return ""
+    if isinstance(details, str):
+        return details
+    if isinstance(details, list):
+        parts = []
+        for d in details:
+            if isinstance(d, dict):
+                parts.append(str(d.get("text") or d.get("content") or ""))
+            elif isinstance(d, str):
+                parts.append(d)
+        return "\n".join(p for p in parts if p)
+    if isinstance(details, dict):
+        return str(details.get("text") or details.get("content") or "")
+    return ""
 
 
 def main() -> int:
@@ -291,7 +362,7 @@ def main() -> int:
     p.add_argument("--model", default=_env("BCOPENCODE_MODEL") or "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")
     p.add_argument("--prompt-file", help="User message file")
     p.add_argument("--system-file", help="Optional system message file")
-    p.add_argument("--max-tokens", type=int, default=int(_env("BCOPENCODE_MAX_TOKENS") or "8192"))
+    p.add_argument("--max-tokens", type=int, default=int(_env("BCOPENCODE_MAX_TOKENS") or "16384"))
     p.add_argument("--temperature", type=float, default=float(_env("BCOPENCODE_TEMPERATURE") or "0.2"))
     p.add_argument("--timeout", type=int, default=int(_env("BCOPENCODE_TIMEOUT") or str(DEFAULT_TIMEOUT)))
     p.add_argument("--allow-paid", action="store_true")

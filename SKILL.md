@@ -137,7 +137,7 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | RESULT | Action |
 |--------|--------|
 | OK | Triage / review gate |
-| TRUNCATED | Incomplete; say so; optional one narrower retry |
+| TRUNCATED | Hit `max_tokens` (`finish_reason=length`). Findings may be partial — **say so**. Raise `--max-tokens` (default 16384), shrink pack, or stage. Reasoning free models (e.g. gpt-oss) burn completion budget on thinking first.
 | AUTH | Fix OpenRouter key / `opencode providers login` — STOP |
 | CAP | Local skill cap — wait or raise `--cap` if user insists |
 | QUOTA | Free RPD/RPM or 402/429 — **STOP**, wait (1000 RPD after $10 top-up; still 20 RPM) |

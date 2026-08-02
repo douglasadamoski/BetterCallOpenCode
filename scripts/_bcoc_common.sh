@@ -13,7 +13,8 @@ LIST_FREE_PY="$_BCOC_SCRIPTS/list_free_models.py"
 
 DEFAULT_MODEL="${BCOPENCODE_MODEL:-openrouter/nvidia/nemotron-3-ultra-550b-a55b:free}"
 DEFAULT_CAP="${BCOPENCODE_CAP:-200}"
-DEFAULT_MAX_TOKENS="${BCOPENCODE_MAX_TOKENS:-8192}"
+# 16k default: reasoning free models (gpt-oss, etc.) count thinking toward max_tokens.
+DEFAULT_MAX_TOKENS="${BCOPENCODE_MAX_TOKENS:-16384}"
 DEFAULT_MAX_INPUT_TOKENS="${BCOPENCODE_MAX_INPUT_TOKENS:-80000}"
 DEFAULT_TIMEOUT="${BCOPENCODE_TIMEOUT:-600}"
 

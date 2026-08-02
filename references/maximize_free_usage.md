@@ -56,10 +56,30 @@ bash scripts/opencode_review.sh ... --cap 500
 
 OpenRouter does not publish a single free wall-clock. Upstream may stall. Mitigations:
 
-- Lower `BCOPENCODE_MAX_TOKENS` / pack size
+- Lower pack size (not answer tokens) if the *request* is huge
 - Stage concerns
 - Switch to Nano after Ultra timeout
 - Skill `TIMEOUT` → report partial, one retry max
+
+## TRUNCATED / `finish_reason=length` (common on free reasoning models)
+
+**Cause:** OpenRouter `max_tokens` is a **completion** ceiling. Models like
+`openai/gpt-oss-20b:free` spend many tokens on **reasoning/thinking** first. If
+you pass a small `--max-tokens` (e.g. 400–800 for a smoke test), the run ends
+with `finish_reason=length`, often with little or no final `content`.
+
+**Fixes (skill defaults already apply these):**
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `--max-tokens` / `BCOPENCODE_MAX_TOKENS` | **16384** | Room for thinking + findings |
+| `BCOPENCODE_REASONING_MAX_TOKENS` | **2048** | Caps reasoning budget via OpenRouter `reasoning.max_tokens` when supported |
+| Smaller pack / stages | — | Fewer input tokens, tighter answers |
+| Prefer Nemotron Ultra/Super free | — | Often better structured code-review answers than tiny reasoning models |
+
+The skill still returns **`RESULT=TRUNCATED`** when the ceiling is hit so Claude
+does **not** treat a partial critique as complete — but the partial body is kept
+in the report when available.
 
 ## Don’t
 

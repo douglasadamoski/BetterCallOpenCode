@@ -168,13 +168,26 @@ print(d.get('summary') or f\"files={d.get('files_included')}/{d.get('files_seen'
   RESULT="$(grep -E '^RESULT=' "$RUN_DIR/client.err" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
   [[ -n "$RESULT" ]] || RESULT="ERROR"
   CONTENT=""
-  PT=""; CT=""; TT=""; COST=""
+  PT=""; CT=""; TT=""; COST=""; RT=""; FINISH=""; MAX_REQ=""; REASON_FB=""
   if [[ -f "$RESP_JSON" ]]; then
-    CONTENT="$(python3 -c "import json;d=json.load(open('$RESP_JSON'));print(d.get('content') or '')" 2>/dev/null || true)"
-    PT="$(python3 -c "import json;d=json.load(open('$RESP_JSON'));u=d.get('usage') or {};print(u.get('prompt_tokens') or '')" 2>/dev/null || true)"
-    CT="$(python3 -c "import json;d=json.load(open('$RESP_JSON'));u=d.get('usage') or {};print(u.get('completion_tokens') or '')" 2>/dev/null || true)"
-    TT="$(python3 -c "import json;d=json.load(open('$RESP_JSON'));u=d.get('usage') or {};print(u.get('total_tokens') or '')" 2>/dev/null || true)"
-    COST="$(python3 -c "import json;d=json.load(open('$RESP_JSON'));u=d.get('usage') or {};print(u.get('cost') if u.get('cost') is not None else '')" 2>/dev/null || true)"
+    eval "$(python3 - "$RESP_JSON" <<'PY'
+import json,sys,shlex
+d=json.load(open(sys.argv[1]))
+u=d.get("usage") or {}
+def q(k,v):
+    print(f"{k}={shlex.quote('' if v is None else str(v))}")
+q("CONTENT", d.get("content") or "")
+q("PT", u.get("prompt_tokens") or "")
+q("CT", u.get("completion_tokens") or "")
+q("TT", u.get("total_tokens") or "")
+q("COST", "" if u.get("cost") is None else u.get("cost"))
+q("RT", u.get("reasoning_tokens") or "")
+q("FINISH", d.get("finish_reason") or "")
+q("MAX_REQ", d.get("max_tokens_requested") or "")
+q("REASON_FB", "yes" if d.get("had_reasoning_fallback") else "no")
+q("ERRMSG", d.get("error") or "")
+PY
+)"
   fi
 
   FREE_FLAG="true"
@@ -190,9 +203,23 @@ print(d.get('summary') or f\"files={d.get('files_included')}/{d.get('files_seen'
     echo "- **Scope:** \`$PRIMARY\`"
     echo "- **Pack:** $PACK_SUMMARY"
     echo "- **RESULT:** $RESULT"
-    echo "- **Tokens:** prompt=${PT:-?} completion=${CT:-?} total=${TT:-?} cost=${COST:-0}"
+    echo "- **finish_reason:** ${FINISH:-?}"
+    echo "- **max_tokens requested:** ${MAX_REQ:-$MAX_TOKENS}"
+    echo "- **Tokens:** prompt=${PT:-?} completion=${CT:-?} reasoning=${RT:-?} total=${TT:-?} cost=${COST:-0}"
+    echo "- **Reasoning fallback:** ${REASON_FB:-no}"
     echo "- **Usage ledger:** \`$USAGE_LOG\`"
     echo
+    if [[ "$RESULT" == "TRUNCATED" ]]; then
+      echo "> [!WARNING]"
+      echo "> **TRUNCATED** — the model hit the completion ceiling (\`finish_reason=${FINISH:-length}\`)."
+      echo "> Findings may be incomplete. Raise \`--max-tokens\` (default 16384), lower pack size,"
+      echo "> or stage the review. Reasoning models burn tokens on thinking before answer text."
+      if [[ -n "${ERRMSG:-}" ]]; then
+        echo ">"
+        echo "> ${ERRMSG}"
+      fi
+      echo
+    fi
     if [[ -n "$STAGES" ]]; then
       echo "- **Stages this turn:** $STAGES"
       echo

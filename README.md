@@ -1,6 +1,7 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="BetterCallOpenCode" width="760">
+<img src="assets/BetterCallOpenCode_black.png" alt="BetterCallOpenCode" width="760">
+
 
 # ⚖ BetterCallOpenCode ⚖
 

@@ -106,6 +106,15 @@ Never pick paid models silently.
 | 402 → QUOTA | Credits / key limit | Top up or raise key limit |
 | 429 → QUOTA | Free RPD/RPM or provider | **STOP**, wait; optional one model rotate |
 | TIMEOUT | Upstream / local | Smaller pack, stages, or retry once |
+| TRUNCATED | `finish_reason=length` — hit `max_tokens` | Raise `--max-tokens` (default **16384**); reasoning models burn budget on thinking |
 | PAID_BLOCKED | Non-free without consent | Switch to `:free` or get user OK |
+
+### Why smoke tests used to return TRUNCATED
+
+Early verification used `--max-tokens 400` / `800` against `openai/gpt-oss-20b:free`.
+That model fills **reasoning** first; the completion ceiling was hit before a normal
+`content` message, so OpenRouter returned `finish_reason=length`. That was **not**
+an OpenRouter outage — it was an undersized completion budget. Re-verified with
+`--max-tokens 4096` → `RESULT=OK`, `finish_reason=stop`.
 
 **Never retry-loop** on QUOTA/CAP.
