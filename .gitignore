@@ -1,0 +1,49 @@
+# Runtime state — usage ledger, temp prompts, run dirs
+state/*
+!state/.gitkeep
+
+# Secrets / local config — NEVER commit
+.env
+.env.*
+*.env
+.bettercallmyai.env
+config.local.*
+**/secrets*
+
+# Reports produced while reviewing projects
+BETTERCALLMYAI_REVIEW_*.md
+BETTERCALLMYAI_EXPERIMENT_*.md
+BETTERCALLMYAI_ADVISE_*.md
+BETTERCALLMYAI_SELFREVIEW_*.md
+
+# Sibling review archives while hardening this skill
+BETTERCALLCHATGPT_REVIEW_*.md
+BETTERCALLGEMINI_REVIEW_*.md
+BETTERCALLGROK_REVIEW_*.md
+
+# Short-lived files next to reports
+.bcmyai_wtest.*
+.bcmyai_report.*
+
+# Raw chafa / intermediate art
+*.chafaraw.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Live fixtures that might contain session noise (keep sample_ only)
+tests/fixtures/live_*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*~
+
+# BetterCallOpenCode local
+state/*
+!state/.gitkeep
+*.pyc
+__pycache__/
+.bettercallopencode.env

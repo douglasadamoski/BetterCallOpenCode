@@ -1,0 +1,19 @@
+{
+  "name": "bettercallopencode",
+  "description": "Marketplace for the BetterCallOpenCode Claude Code plugin.",
+  "owner": { "name": "Douglas Adamoski" },
+  "plugins": [
+    {
+      "name": "better-call-opencode",
+      "displayName": "BetterCallOpenCode",
+      "description": "Delegate an independent, critical code review to free OpenRouter models via OpenCode / OpenRouter; Claude triages and implements. Free-only by default.",
+      "source": "./",
+      "version": "1.0.0",
+      "author": { "name": "Douglas Adamoski", "url": "https://github.com/douglasadamoski" },
+      "homepage": "https://github.com/douglasadamoski/BetterCallOpenCode",
+      "repository": "https://github.com/douglasadamoski/BetterCallOpenCode",
+      "license": "GPL-3.0",
+      "keywords": ["code-review", "opencode", "openrouter", "free-models", "claude-code"]
+    }
+  ]
+}

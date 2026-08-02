@@ -1,0 +1,141 @@
+{
+  "fetched_at": "2026-08-02T22:00:24Z",
+  "count": 15,
+  "models": [
+    {
+      "id": "cohere/north-mini-code:free",
+      "name": "Cohere: North Mini Code (free)",
+      "context_length": 256000,
+      "max_completion_tokens": 64000,
+      "modality": "text->text",
+      "opencode_model": "openrouter/cohere/north-mini-code:free",
+      "description": "North Mini Code is Cohere's first agentic coding model and the debut of its North family. A sparse mixture-of-experts model with 30B total parameters and 3B active, it is optimized..."
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "name": "Google: Gemma 4 26B A4B  (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 32768,
+      "modality": "text+image+video->text",
+      "opencode_model": "openrouter/google/gemma-4-26b-a4b-it:free",
+      "description": "Gemma 4 26B A4B IT is an instruction-tuned Mixture-of-Experts (MoE) model from Google DeepMind. Despite 25.2B total parameters, only 3.8B activate per token during inference \u2014 delivering near-31B quality at..."
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "name": "Google: Gemma 4 31B (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 32768,
+      "modality": "text+image+video->text",
+      "opencode_model": "openrouter/google/gemma-4-31b-it:free",
+      "description": "Gemma 4 31B Instruct is Google DeepMind's 30.7B dense multimodal model supporting text and image input with text output. Features a 256K token context window, configurable thinking/reasoning mode, native function..."
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash:free",
+      "name": "Ling-3.0-flash (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 32768,
+      "modality": "text->text",
+      "opencode_model": "openrouter/inclusionai/ling-3.0-flash:free",
+      "description": "*Ling-3.0-flash* is a *124B-parameter Mixture-of-Experts (MoE) model*, with approximately *5.1B parameters activated per token*. The model is designed with *token efficiency and production-scale agentic inference* as key priorities, enabling developers..."
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-30b-a3b:free",
+      "name": "NVIDIA: Nemotron 3 Nano 30B A3B (free)",
+      "context_length": 256000,
+      "max_completion_tokens": null,
+      "modality": "text->text",
+      "opencode_model": "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
+      "description": "NVIDIA Nemotron 3 Nano 30B A3B is a small language MoE model with highest compute efficiency and accuracy for developers to build specialized agentic AI systems. The model is fully..."
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "name": "NVIDIA: Nemotron 3 Nano Omni (free)",
+      "context_length": 256000,
+      "max_completion_tokens": 65536,
+      "modality": "text+image+audio+video->text",
+      "opencode_model": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "description": "NVIDIA Nemotron\u2122 3 Nano Omni is a 30B-A3B open multimodal model designed to function as a perception and context sub-agent in enterprise agent systems. It accepts text, image, video, and..."
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "name": "NVIDIA: Nemotron 3 Super (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 262144,
+      "modality": "text->text",
+      "opencode_model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+      "description": "NVIDIA Nemotron 3 Super is a 120B-parameter open hybrid MoE model, activating just 12B parameters for maximum compute efficiency and accuracy in complex multi-agent applications. Built on a hybrid Mamba-Transformer..."
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "name": "NVIDIA: Nemotron 3 Ultra (free)",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "modality": "text->text",
+      "opencode_model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+      "description": "NVIDIA Nemotron 3 Ultra is an open frontier-reasoning and orchestration model from NVIDIA, with 55B active parameters out of 550B total (MoE). Built on a hybrid Transformer-Mamba mixture-of-experts architecture, it..."
+    },
+    {
+      "id": "nvidia/nemotron-3.5-content-safety:free",
+      "name": "NVIDIA: Nemotron 3.5 Content Safety (free)",
+      "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "modality": "text+image->text",
+      "opencode_model": "openrouter/nvidia/nemotron-3.5-content-safety:free",
+      "description": "NVIDIA Nemotron 3.5 Content Safety is a compact 4B-parameter multimodal guardrail model from NVIDIA, fine-tuned from Google Gemma-3-4B. It moderates both inputs to and responses from LLMs and VLMs, accepting..."
+    },
+    {
+      "id": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "name": "NVIDIA: Nemotron Nano 12B 2 VL (free)",
+      "context_length": 128000,
+      "max_completion_tokens": 128000,
+      "modality": "text+image+video->text",
+      "opencode_model": "openrouter/nvidia/nemotron-nano-12b-v2-vl:free",
+      "description": "NVIDIA Nemotron Nano 2 VL is a 12-billion-parameter open multimodal reasoning model designed for video understanding and document intelligence. It introduces a hybrid Transformer-Mamba architecture, combining transformer-level accuracy with Mamba\u2019s..."
+    },
+    {
+      "id": "nvidia/nemotron-nano-9b-v2:free",
+      "name": "NVIDIA: Nemotron Nano 9B V2 (free)",
+      "context_length": 128000,
+      "max_completion_tokens": null,
+      "modality": "text->text",
+      "opencode_model": "openrouter/nvidia/nemotron-nano-9b-v2:free",
+      "description": "NVIDIA-Nemotron-Nano-9B-v2 is a large language model (LLM) trained from scratch by NVIDIA, and designed as a unified model for both reasoning and non-reasoning tasks. It responds to user queries and..."
+    },
+    {
+      "id": "openai/gpt-oss-20b:free",
+      "name": "OpenAI: gpt-oss-20b (free)",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "modality": "text->text",
+      "opencode_model": "openrouter/openai/gpt-oss-20b:free",
+      "description": "gpt-oss-20b is an open-weight 21B parameter model released by OpenAI under the Apache 2.0 license. It uses a Mixture-of-Experts (MoE) architecture with 3.6B active parameters per forward pass, optimized for..."
+    },
+    {
+      "id": "openrouter/free",
+      "name": "Free Models Router",
+      "context_length": 200000,
+      "max_completion_tokens": null,
+      "modality": "text+image->text",
+      "opencode_model": "openrouter/openrouter/free",
+      "description": "The simplest way to get free inference. openrouter/free is a router that selects free models at random from the models available on OpenRouter. The router smartly filters for models that..."
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1 (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 32768,
+      "modality": "text->text",
+      "opencode_model": "openrouter/poolside/laguna-s-2.1:free",
+      "description": "Laguna S 2.1 is the latest coding agent model from [Poolside](<https://poolside.ai/>). Laguna S 2.1 is a 118B total parameter model with 8B active parameters, scoring 70.2% on Terminal-Bench 2.1 and..."
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "name": "Poolside: Laguna XS 2.1 (free)",
+      "context_length": 262144,
+      "max_completion_tokens": 32768,
+      "modality": "text->text",
+      "opencode_model": "openrouter/poolside/laguna-xs-2.1:free",
+      "description": "Laguna XS 2.1 is the latest coding agent model in the 33B-A3B category from [Poolside](https://poolside.ai/) and a step forward from their Laguna XS.2 model (released in April 2026). It combines..."
+    }
+  ]
+}
