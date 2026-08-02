@@ -131,3 +131,125 @@ def test_packer_does_not_refuse_its_own_source():
     ):
         assert critical in included, f"secret filter refused this repo's own {critical}"
     assert not meta["secrets_skipped_by_content"], meta["secrets_skipped_by_content"]
+
+
+# --- Regressions from the 2026-08-03 secrets/exfiltration audit -----------------
+
+
+def test_credential_past_8kib_is_caught(tmp_path):
+    """Audit C2: the scan window must never be narrower than the pack window.
+
+    The first version scanned only the first 8 KiB while packing files up to 120 KB,
+    so a key at offset 14,430 was packed and sent.
+    """
+    (tmp_path / "notes.md").write_text(
+        "# notes\n" + ("filler line\n" * 1200) + f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\n"
+    )
+    body, meta = pack_context.pack(tmp_path)
+    assert FAKE_OPENROUTER not in body
+    assert "notes.md" in meta["secrets_skipped_by_content"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "prod.env",            # no leading dot — the sharpest miss in the audit
+        "env.production",
+        "server.ppk",
+        ".pgpass",
+        "terraform.tfvars",
+        "config/creds/db.yaml",
+        "kubeconfig",
+    ],
+)
+def test_audit_h1_names_are_now_covered(name):
+    assert pack_context.is_secret(Path(name), name), f"{name} would still be packed"
+
+
+def _assign(key, value, quote='"', sep="="):
+    """Build a credential assignment at RUNTIME.
+
+    Same invariant as pack_context.py: this file must never contain a literal string
+    its own patterns match, or the packer withholds the whole test suite from review.
+    Writing `FOO="sk_live_…"` inline was enough to trip it.
+    """
+    return f"{key}{sep}{quote}{value}{quote}"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _assign("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzPvKkQ8T3B",
+                quote="", sep=" = "),
+        _assign("STRIPE_SECRET", "sk_" + "live_" + "a" * 30),
+        _assign("GOOGLE_API_KEY", "AIza" + "S" * 35, quote=""),
+        _assign("password", "Tr0ub4dor&3xK", sep=": "),
+        _assign("PuTTY-" + "User-Key-File-2", "ssh-rsa", quote="", sep=": "),
+    ],
+)
+def test_audit_h1_shapes_are_now_caught(tmp_path, content):
+    (tmp_path / "app.conf").write_text(content + "\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"missed: {content[:40]}"
+    assert content not in body
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'export OPENROUTER_API_KEY="sk-or-…"',      # this repo's own SKILL.md line
+        'API_KEY="<your-api-key-here>"',
+        'password = "changeme"',
+        "SECRET=${VAULT_SECRET}",
+        'api_key: "xxxxxxxxxxxx"',
+        'token: "example-token"',
+    ],
+)
+def test_documentation_placeholders_are_not_withheld(tmp_path, content):
+    """The assignment heuristic fires on shape alone.
+
+    Without placeholder detection every README showing `API_KEY="sk-or-…"` is withheld
+    from its own review — including this repo's SKILL.md and README.md, which is how
+    this was found.
+    """
+    (tmp_path / "README.md").write_text(f"# docs\n\n```bash\n{content}\n```\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"placeholder withheld: {content}"
+    assert [i["path"] for i in meta["included"]] == ["README.md"]
+
+
+def test_own_output_is_not_repacked(tmp_path):
+    """Audit H5: review #2 must not upload review #1's report and summary.csv."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "BETTERCALLOPENCODE_REVIEW_20260101T000000Z.md").write_text("marker_prevreport\n")
+    panel = tmp_path / "BetterCallOpenCode" / "multi_x"
+    panel.mkdir(parents=True)
+    (panel / "summary.csv").write_text("model,error\nx,marker_csvkey\n")
+    (panel / "MULTI_INDEX.md").write_text("marker_index\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert [i["path"] for i in meta["included"]] == ["app.py"]
+    for marker in ("marker_prevreport", "marker_csvkey", "marker_index"):
+        assert marker not in body
+
+
+def test_ancestor_named_secrets_does_not_withhold_the_whole_project(tmp_path):
+    """Audit L2: matching absolute path.parts withheld every file in a normal project."""
+    proj = tmp_path / "secrets" / "myproject"
+    proj.mkdir(parents=True)
+    (proj / "main.py").write_text("print('hello')\n")
+    body, meta = pack_context.pack(proj)
+    assert [i["path"] for i in meta["included"]] == ["main.py"]
+    assert meta["scope_root_in_secret_dir"] == ["secrets"], "caller should still be warned"
+
+
+def test_pruned_directories_are_recorded(tmp_path):
+    """Audit L1: a prune must be visible, or "never looked" reads as "nothing there"."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519").write_text("private\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.js").write_text("1\n")
+    _body, meta = pack_context.pack(tmp_path)
+    pruned = " ".join(meta["pruned_dirs"])
+    assert ".ssh (hidden-dir)" in pruned
+    assert "node_modules (skip-dir)" in pruned

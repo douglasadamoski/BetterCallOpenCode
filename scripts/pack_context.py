@@ -31,18 +31,39 @@ SKIP_DIR_NAMES = {
     ".claude",
     ".grok",
     ".cursor",
+    # This skill's own panel output. Without it, review #2 packs review #1's reports and
+    # summary.csv and uploads them again — including any unredacted error snippet — which
+    # turns a local artifact into a remote one.
+    "BetterCallOpenCode",
+    "BetterCallChatGPT",
+    "BetterCallGemini",
+    "BetterCallGrok",
+    "BetterCallMyAI",
 }
 
+# The skill's own reports, wherever they sit. Same reason as the dirs above.
+OWN_OUTPUT_RE = re.compile(
+    r"(^|/)BETTERCALL[A-Z]+_(REVIEW|EXPERIMENT|ADVISE|SELFREVIEW)_.*\.md$"
+    r"|(^|/)MULTI_INDEX\.md$"
+    r"|(^|/)summary\.csv$",
+    re.I,
+)
+
 SECRET_NAME_RE = re.compile(
-    r"(^\.env.*$|(^|/)credentials(\.|$)|\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|"
+    # NB `\.env` must NOT require a leading dot: `prod.env` and `env.production` are
+    # extremely common real filenames and both walked straight through the first version.
+    r"((^|/|\.)env($|\..*$)|(^|/)env\..*$|"
+    r"(^|/)creds?(\.|$)|(^|/)credentials(\.|$)|"
+    r"\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|\.ppk$|\.keystore$|"
     r"(^|/)id_rsa|(^|/)id_ed25519|(^|/)id_ecdsa|(^|/)id_dsa|"
-    r"\.pypirc$|\.netrc$|(^|/)secrets?(\.|$)|(^|/)api[_-]?keys?(\.|$)|"
+    r"\.pypirc$|\.netrc$|(^|/)\.pgpass$|(^|/)secrets?(\.|$)|(^|/)api[_-]?keys?(\.|$)|"
     # Every BetterCall* sibling stores its key in <name>.env — cover the family by
     # construction, not one name at a time. Omitting this once shipped the user's
     # OPENROUTER_API_KEY to a third-party model.
     r"\.bettercall[a-z0-9]*\.env$|"
     r"(^|/)auth\.json$|(^|/)config\.env$|(^|/)\.docker/config\.json$|"
-    r"\.htpasswd$|\.tfstate$|(^|/)\.terraform(/|$)|"
+    r"(^|/)\.kube/config$|(^|/)kubeconfig$|"
+    r"\.htpasswd$|\.tfstate$|\.tfvars$|(^|/)\.terraform(/|$)|"
     r"\.npmrc$|\.git-credentials$)",
     re.I,
 )
@@ -56,21 +77,78 @@ SECRET_CONTENT_RE = re.compile(
             b"sk-" + b"or-v1-[A-Za-z0-9]{16,}",
             b"sk-" + b"ant-[A-Za-z0-9_-]{20,}",
             b"sk-" + b"proj-[A-Za-z0-9_-]{20,}",
+            b"sk-" + b"live-[A-Za-z0-9]{16,}",
+            b"sk_" + b"live_[A-Za-z0-9]{16,}",
+            b"rk_" + b"live_[A-Za-z0-9]{16,}",
             b"ghp_" + b"[A-Za-z0-9]{20,}",
             b"gho_" + b"[A-Za-z0-9]{20,}",
+            b"ghs_" + b"[A-Za-z0-9]{20,}",
             b"github_pat_" + b"[A-Za-z0-9_]{20,}",
-            b"xoxb-" + b"[A-Za-z0-9-]{20,}",
+            b"xox" + b"[bpasr]-[A-Za-z0-9-]{20,}",
+            b"xapp-" + b"[A-Za-z0-9-]{20,}",
+            b"AIza" + b"[A-Za-z0-9_-]{30,}",
             b"AKIA" + b"[0-9A-Z]{16}",
+            b"ASIA" + b"[0-9A-Z]{16}",
+            b"glpat-" + b"[A-Za-z0-9_-]{16,}",
             b"-----BEGIN " + b"[A-Z ]*PRIVATE KEY-----",
+            b"PuTTY-" + b"User-Key-File",
         ]
     )
 )
-SECRET_CONTENT_SCAN_BYTES = 8192
+
+# Assignment-shaped secrets — an env-var or YAML/JSON assignment of a credential to a
+# quoted, non-trivial value.
+#
+# Case-insensitive, so it must be a separate pattern: Python requires an inline (?i) to
+# sit at the start of the whole expression, and the vendor-token set above must stay
+# case-SENSITIVE (a case-insensitive `AKIA[0-9A-Z]{16}` matches far too much prose).
+#
+# Requiring both an assignment operator and a quoted 6+ char value is what keeps ordinary
+# prose about credentials from tripping it.
+#
+# INVARIANT for this whole file: never write a literal example that these patterns match.
+# Split it (`b"PuTTY-" + b"User-Key-File"`) or describe it in words. Otherwise this file
+# matches itself, the packer withholds its own secret filter from every review of this
+# repo, and nobody can review the most security-critical code here. Enforced by
+# tests/test_pack_secrets.py::test_packer_does_not_refuse_its_own_source, which has now
+# caught this three times.
+SECRET_ASSIGN_RE = re.compile(
+    rb"aws_secret_access_key[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{30,}"
+    rb"|(pass(word|wd)?|secret|api[_-]?key|access[_-]?token)"
+    rb"[\"']?\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']",
+    re.I,
+)
+
+
+# Values that are obviously illustrative rather than live. The assignment heuristic is
+# deliberately broad, so without this every README showing `API_KEY="sk-or-…"` would be
+# withheld from its own review — including this repo's SKILL.md and README.md.
+PLACEHOLDER_RE = re.compile(
+    rb"\.\.\."
+    rb"|\xe2\x80\xa6"  # UTF-8 ellipsis
+    rb"|[<>{}$]"  # <your-key>, ${VAR}, {{TOKEN}}
+    rb"|\*{3,}|x{4,}|X{4,}"
+    rb"|example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder|redacted"
+    rb"|dummy|fake|sample|todo|insert|replace|hunter2|s3cret|secret[_-]?here",
+    re.I,
+)
 
 
 def looks_secret_content(data: bytes) -> bool:
-    """True if the head of this file carries something shaped like a live credential."""
-    return SECRET_CONTENT_RE.search(data[:SECRET_CONTENT_SCAN_BYTES]) is not None
+    """True if this file carries something shaped like a live credential.
+
+    Scans the WHOLE buffer, not a fixed head. An earlier version scanned only the first
+    8 KiB while packing files up to 120 KB, so a key at offset 14,430 was packed and sent
+    — the scan window must never be narrower than the pack window.
+    """
+    if SECRET_CONTENT_RE.search(data) is not None:
+        return True
+    # The assignment heuristic fires on shape alone, so each hit is checked against the
+    # placeholder list. One live-looking assignment is enough to withhold the file.
+    for m in SECRET_ASSIGN_RE.finditer(data):
+        if not PLACEHOLDER_RE.search(m.group(0)):
+            return True
+    return False
 
 BINARY_EXT = {
     ".png",
@@ -198,19 +276,31 @@ def ignored(rel: str, patterns: List[str]) -> bool:
     return False
 
 
+SECRET_DIRS = {
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    "secrets",
+    "secret",
+    "creds",
+    "credentials",
+    "api_keys",
+    "api-keys",
+}
+
+
 def is_secret(path: Path, rel: str = "") -> bool:
     name = path.name
     rel_n = (rel or name).replace("\\", "/")
     if SECRET_NAME_RE.search(name) or SECRET_NAME_RE.search(rel_n):
         return True
-    # common secret path segments / directories
-    parts = {p.lower() for p in path.parts}
-    if rel:
-        parts |= {p.lower() for p in Path(rel).parts}
-    secret_dirs = {".ssh", ".aws", "secrets", "secret", "credentials", "api_keys", "api-keys"}
-    if parts & secret_dirs:
-        return True
-    return False
+    # Secret-looking path SEGMENTS, matched against the scope-relative path only.
+    # Matching path.parts (absolute) meant that reviewing ~/work/secrets/myproject
+    # withheld every file in an ordinary project and returned a confident report about
+    # an empty pack. Whether the scope ROOT itself sits in a secret directory is a
+    # different question, reported separately via scope_root_in_secret_dir.
+    parts = {p.lower() for p in Path(rel_n).parts}
+    return bool(parts & SECRET_DIRS)
 
 
 def is_binary_path(path: Path) -> bool:
@@ -242,16 +332,31 @@ def rank_file(path: Path, rel: str) -> int:
 
 
 def iter_files(
-    root: Path, patterns: List[str], secret_sink: Optional[List[str]] = None
+    root: Path,
+    patterns: List[str],
+    secret_sink: Optional[List[str]] = None,
+    pruned_sink: Optional[List[str]] = None,
 ) -> Iterable[Tuple[int, Path, str]]:
     for dirpath, dirnames, filenames in os.walk(root):
         # prune dirs in-place
         kept = []
         for d in dirnames:
+            reason = None
             if d in SKIP_DIR_NAMES:
-                continue
-            if d.startswith(".") and d not in (".github",):
-                # skip hidden dirs except .github
+                reason = "skip-dir"
+            elif d.startswith(".") and d not in (".github", ".claude-plugin"):
+                # Hidden dirs are pruned wholesale — this is what actually keeps .ssh,
+                # .aws, .gnupg and .config/gcloud out, not SKIP_DIR_NAMES. Record it:
+                # a user auditing the meta must be able to tell "no secrets there" from
+                # "never looked", and an unrecorded prune reads as the former.
+                reason = "hidden-dir"
+            if reason:
+                if pruned_sink is not None:
+                    try:
+                        pd = str((Path(dirpath) / d).relative_to(root)).replace("\\", "/")
+                    except ValueError:
+                        pd = d
+                    pruned_sink.append(f"{pd} ({reason})")
                 continue
             kept.append(d)
         dirnames[:] = kept
@@ -260,6 +365,8 @@ def iter_files(
             try:
                 rel = str(full.relative_to(root)).replace("\\", "/")
             except ValueError:
+                continue
+            if OWN_OUTPUT_RE.search(rel):
                 continue
             if ignored(rel, patterns):
                 continue
@@ -299,7 +406,11 @@ def pack(
     root = root.resolve()
     patterns = load_gitignore(root)
     secrets_by_name: List[str] = []
-    ranked = sorted(iter_files(root, patterns, secrets_by_name), key=lambda x: (-x[0], x[2]))
+    pruned_dirs: List[str] = []
+    ranked = sorted(
+        iter_files(root, patterns, secrets_by_name, pruned_dirs),
+        key=lambda x: (-x[0], x[2]),
+    )
     all_rels = [rel for _, _, rel in ranked]
     tree = build_tree(root, all_rels)
     header = (
@@ -386,6 +497,15 @@ def pack(
         # and "which secrets did you withhold" must never fall off the end of a list.
         "secrets_skipped_by_name": sorted(secrets_by_name),
         "secrets_skipped_by_content": sorted(secrets_skipped),
+        # Whole directories never walked. Without this the meta cannot distinguish
+        # "no secrets in .ssh" from "never looked at .ssh".
+        "pruned_dirs": sorted(pruned_dirs),
+        # The scope root itself sitting under a secret-looking directory is a caller
+        # problem, not a per-file one — flag it instead of silently withholding
+        # every file in an otherwise ordinary project.
+        "scope_root_in_secret_dir": sorted(
+            {p.lower() for p in root.parts} & SECRET_DIRS
+        ),
         "truncated_files": truncated_files,
         "budget_exhausted": any(s.get("reason") == "token budget" for s in skipped),
     }
