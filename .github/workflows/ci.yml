@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    # First job on purpose: this repo's whole promise is that it does not leak keys.
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for credential shapes
+        run: |
+          set -uo pipefail
+          # Fragments are concatenated so this workflow never matches itself.
+          pats=(
+            "sk-""or-v1-[A-Za-z0-9]{16,}"
+            "sk-""ant-[A-Za-z0-9_-]{20,}"
+            "sk-""proj-[A-Za-z0-9_-]{20,}"
+            "ghp_""[A-Za-z0-9]{20,}"
+            "gho_""[A-Za-z0-9]{20,}"
+            "github_pat_""[A-Za-z0-9_]{20,}"
+            "xoxb-""[A-Za-z0-9-]{20,}"
+            "AKIA""[0-9A-Z]{16}"
+            "-----BEGIN ""[A-Z ]*PRIVATE KEY-----"
+          )
+          rc=0
+          for p in "${pats[@]}"; do
+            if git grep -nIE "$p" -- . ':!.github/workflows/ci.yml' ':!scripts/pack_context.py'; then
+              echo "::error::credential-shaped string matched: $p"
+              rc=1
+            fi
+          done
+          exit $rc
+
+      - name: Packer must withhold planted credentials
+        run: |
+          set -euo pipefail
+          f="$(mktemp -d)"
+          mkdir -p "$f/sub"
+          printf 'OPENROUTER_API_KEY=sk-or-v1-%s\n' "$(printf 'a%.0s' {1..48})" > "$f/.bettercallopencode.env"
+          printf 'key=sk-or-v1-%s\n' "$(printf 'b%.0s' {1..48})" > "$f/auth.json"
+          printf 'token=ghp_%s\n' "$(printf 'd%.0s' {1..36})" > "$f/sub/notes.md"
+          printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$f/id_rsa"
+          printf 'def hello(): pass\n' > "$f/ok.py"
+          python3 scripts/pack_context.py "$f" --meta-out /tmp/meta.json > /tmp/body.txt
+          for bad in 'sk-or-v1-a' 'sk-or-v1-b' 'ghp_d' 'BEGIN RSA PRIVATE KEY'; do
+            if grep -q -- "$bad" /tmp/body.txt; then
+              echo "::error::packer leaked $bad"; exit 1
+            fi
+          done
+          python3 -c "
+import json; d=json.load(open('/tmp/meta.json'))
+assert '.bettercallopencode.env' in d['secrets_skipped_by_name'], d
+assert 'sub/notes.md' in d['secrets_skipped_by_content'], d
+assert [i['path'] for i in d['included']] == ['ok.py'], d
+print('packer withheld every planted credential')"
+
+      - name: Packer must still pack this repo (no self-refusal)
+        run: |
+          set -euo pipefail
+          python3 scripts/pack_context.py . --max-input-tokens 80000 --meta-out /tmp/self.json > /dev/null
+          python3 -c "
+import json; d=json.load(open('/tmp/self.json'))
+inc={i['path'] for i in d['included']}
+missing=[p for p in ['scripts/pack_context.py','scripts/_bcoc_common.sh','scripts/opencode_review.sh','SKILL.md'] if p not in inc]
+assert not missing, f'secret filter refused its own source: {missing}'
+assert not d['secrets_skipped_by_content'], d['secrets_skipped_by_content']
+print('self-pack ok')"
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: shellcheck (errors block; warnings advisory until the backlog is cleared)
+        run: |
+          set -uo pipefail
+          echo "--- advisory: warning+style ---"
+          shellcheck -S style -f gcc scripts/*.sh || true
+          echo "--- blocking: errors ---"
+          shellcheck -S error -f gcc scripts/*.sh
+
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install --quiet pytest
+      # No network in CI: the suite must be fully offline. A test that reaches
+      # OpenRouter would silently spend the maintainer's free daily requests.
+      - run: pytest -q tests/
+
+  syntax:
+    name: syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          set -euo pipefail
+          for f in scripts/*.sh; do bash -n "$f"; done
+          for f in scripts/*.py tests/*.py; do python3 -m py_compile "$f"; done
+          echo "all scripts parse"
