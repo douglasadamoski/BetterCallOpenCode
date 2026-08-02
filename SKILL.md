@@ -40,7 +40,11 @@ If missing, skip silently. Regenerate:
 
 ## Core principles
 
-1. **Critic does not change the codebase.** `or-api` has no FS access. `opencode` backend uses a review agent with `edit: deny` (+ never `--auto`).
+1. **Critic does not change the codebase — guaranteed only on `or-api`.** `or-api` is a
+   plain HTTP endpoint: no filesystem, no shell, no reach into your machine. It sees only
+   the packed text this skill sends. **`--backend opencode` currently carries NO such
+   guarantee** and is gated behind `BCOPENCODE_UNSAFE_OPENCODE=1` — see
+   `references/opencode_notes.md`. Never pass `--auto`.
 2. **Free-only by default.** Models must end with `:free` or be `openrouter/free`. Non-free → `RESULT=PAID_BLOCKED` unless the user **explicitly** asks to spend credits and you pass `--allow-paid` / `BCOPENCODE_ALLOW_PAID=1`.
 3. **Be broad.** Intent-first; invent tests; do not hand over the suite to rubber-stamp.
 4. **Respect free limits.** On AUTH/CAP/QUOTA: **STOP** — no retry loops. Preflight shows free bucket (**50 vs 1000 RPD**) and credits.
@@ -100,11 +104,19 @@ rm -f "$PF"
 
 ### Agentic OpenCode backend
 
+> [!CAUTION]
+> **This backend is not currently write-restricted.** On opencode 1.18.11 the
+> `edit: deny` / `bash: deny` frontmatter in `agents/bcoc-review.md` is silently
+> ignored — `opencode agent list` resolves the agent to `permission "*": allow`.
+> A critic run this way **can write files and run shell** in the reviewed scope.
+> Enforcement + an edit-guard are being added; until then the backend refuses
+> unless you set `BCOPENCODE_UNSAFE_OPENCODE=1`.
+
 ```bash
-bash "$SKILL_DIR/scripts/opencode_review.sh" ... --backend opencode
+BCOPENCODE_UNSAFE_OPENCODE=1 bash "$SKILL_DIR/scripts/opencode_review.sh" ... --backend opencode
 ```
 
-Requires `opencode` on PATH and OpenRouter connected. Uses agent `bcoc-review` (edit denied).
+Requires `opencode` on PATH and OpenRouter connected. Prefer `--backend or-api`.
 
 ## Mode B — Experiment
 
@@ -152,6 +164,7 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | QUOTA | Free RPD/RPM or 402/429 — **STOP**, wait (1000 RPD after $10 top-up; still 20 RPM) |
 | TIMEOUT | Smaller pack / stages; retry **once** |
 | PAID_BLOCKED | Switch to `:free` or get explicit paid consent |
+| REFUSED | A gate refused before spending anything (e.g. `--backend opencode` without `BCOPENCODE_UNSAFE_OPENCODE=1`). Read the stderr reason — **do not** work around it without telling the user what the gate protects |
 | UNREACHABLE / ERROR | Show report details; don't retry blindly |
 
 ## Report back

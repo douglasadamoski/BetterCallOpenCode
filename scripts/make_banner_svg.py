@@ -7,8 +7,8 @@ Uses Rich's save_svg, so the output is the same `class="rich-terminal"` SVG form
 
 Usage:
   make_banner_svg.py [art.txt] [out.svg] [title]
-Defaults: assets/better_call_myai.txt -> assets/banner.svg,
-          title "It's Better Call MyAI!".
+Defaults: assets/better_call_opencode.txt -> assets/banner.svg,
+          title "It's Better Call OpenCode!".
 Requires: rich (pip install rich).
 """
 import io
@@ -17,9 +17,9 @@ import sys
 from rich.console import Console
 from rich.text import Text
 
-art = sys.argv[1] if len(sys.argv) > 1 else "assets/better_call_myai.txt"
+art = sys.argv[1] if len(sys.argv) > 1 else "assets/better_call_opencode.txt"
 out = sys.argv[2] if len(sys.argv) > 2 else "assets/banner.svg"
-title = sys.argv[3] if len(sys.argv) > 3 else "It's Better Call MyAI!"
+title = sys.argv[3] if len(sys.argv) > 3 else "It's Better Call OpenCode!"
 
 ansi = open(art, encoding="utf-8").read().rstrip("\n")
 # Width = the art's VISIBLE column count (e.g. 88), measured via Rich's cell length so the

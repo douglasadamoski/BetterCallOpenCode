@@ -14,8 +14,7 @@ Claude triages findings and implements the rest.
 
 Siblings: [BetterCallChatGPT](https://github.com/douglasadamoski/BetterCallChatGPT) ·
 [BetterCallGemini](https://github.com/douglasadamoski/BetterCallGemini) ·
-[BetterCallGrok](https://github.com/douglasadamoski/BetterCallGrok) ·
-[BetterCallMyAI](https://github.com/douglasadamoski/BetterCallMyAI)
+[BetterCallGrok](https://github.com/douglasadamoski/BetterCallGrok)
 
 </div>
 
@@ -69,7 +68,15 @@ git clone https://github.com/douglasadamoski/BetterCallOpenCode.git ~/.claude/sk
 
 Vendor critics are great until you want **zero marginal cost** multi-model opinions. BetterCallOpenCode
 defaults to OpenRouter **`:free`** models (Nemotron Ultra/Super/Nano, Gemma 4 free, gpt-oss free, …),
-packs the scope (or runs a write-denied OpenCode agent), and leaves decisions with Claude.
+packs the scope and sends it to a plain HTTP endpoint, and leaves every decision with Claude.
+
+> [!CAUTION]
+> The default `--backend or-api` critic is an HTTP endpoint — no filesystem, no shell, no
+> reach into your machine. The optional `--backend opencode` agentic critic **is not
+> write-restricted today**: on opencode 1.18.11 the `edit: deny` frontmatter is silently
+> ignored and the agent resolves to `permission "*": allow`. It is gated behind
+> `BCOPENCODE_UNSAFE_OPENCODE=1` until enforcement and an edit-guard land. See
+> [`references/opencode_notes.md`](references/opencode_notes.md).
 
 | Mode | What the free model does | What Claude does |
 |------|--------------------------|------------------|
@@ -109,7 +116,7 @@ scripts/multi_review.sh       # multi-model fan-out
 scripts/pack_context.py       # scope packer
 templates/                    # critique / experiment / chunk prompts
 references/                   # free models, OpenCode notes, maximize free
-agents/bcoc-review.md         # write-denied OpenCode agent
+agents/bcoc-review.md         # OpenCode critic agent (NOT write-restricted yet — see notes)
 assets/                       # banner art
 ```
 

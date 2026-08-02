@@ -2,28 +2,38 @@
 state/*
 !state/.gitkeep
 
-# Secrets / local config — NEVER commit
+# Secrets / local config — NEVER commit.
+# `*.env` covers .bettercallopencode.env and every sibling's, but they are named
+# explicitly too: this is the one file the docs tell users to put a key in, and it
+# has already been forgotten once (in pack_context.py's filter).
 .env
 .env.*
 *.env
+.bettercallopencode.env
 .bettercallmyai.env
+config.env
 config.local.*
+auth.json
 **/secrets*
 
 # Reports produced while reviewing projects
-BETTERCALLMYAI_REVIEW_*.md
-BETTERCALLMYAI_EXPERIMENT_*.md
-BETTERCALLMYAI_ADVISE_*.md
-BETTERCALLMYAI_SELFREVIEW_*.md
+BETTERCALLOPENCODE_REVIEW_*.md
+BETTERCALLOPENCODE_EXPERIMENT_*.md
+BETTERCALLOPENCODE_SELFREVIEW_*.md
+
+# Multi-model panel output dirs
+multi_*/
+selfreview_*/
 
 # Sibling review archives while hardening this skill
 BETTERCALLCHATGPT_REVIEW_*.md
 BETTERCALLGEMINI_REVIEW_*.md
 BETTERCALLGROK_REVIEW_*.md
+SUGGESTION.md
 
 # Short-lived files next to reports
-.bcmyai_wtest.*
-.bcmyai_report.*
+.bcoc_wtest.*
+.bcoc_report.*
 
 # Raw chafa / intermediate art
 *.chafaraw.txt
@@ -40,10 +50,3 @@ tests/fixtures/live_*
 .DS_Store
 Thumbs.db
 *~
-
-# BetterCallOpenCode local
-state/*
-!state/.gitkeep
-*.pyc
-__pycache__/
-.bettercallopencode.env

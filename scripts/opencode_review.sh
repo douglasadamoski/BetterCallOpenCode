@@ -254,6 +254,25 @@ PY
 fi
 
 # ---- backend opencode ----
+# GATE: this backend has no working write-restriction. Measured on opencode 1.18.11,
+# the `edit: deny` / `bash: deny` frontmatter in agents/bcoc-review.md is silently
+# ignored and `opencode agent list` resolves the agent to `permission "*": allow`.
+# A critic run this way can write files and run shell in the reviewed scope.
+# Reproduce: OPENCODE_CONFIG_DIR="$SKILL_DIR/opencode-config" opencode agent list
+# Remove this gate only once the OPENCODE_PERMISSION deny-set is applied AND verified
+# AND the edit-guard is in place with its selftest green.
+if [[ ! "${BCOPENCODE_UNSAFE_OPENCODE:-}" =~ ^(1|true|yes)$ ]]; then
+  cat >&2 <<'EOF'
+REFUSED: --backend opencode is not write-restricted on this opencode version.
+  The agent's `edit: deny` frontmatter is silently ignored; permissions resolve to "*": allow,
+  so the critic can write files and run shell inside the reviewed scope.
+  Verify yourself:  OPENCODE_CONFIG_DIR="<skill>/opencode-config" opencode agent list
+  Use --backend or-api (no filesystem access at all), or, accepting the risk on a scope
+  you are willing to have modified, re-run with BCOPENCODE_UNSAFE_OPENCODE=1.
+EOF
+  echo "RESULT=REFUSED"
+  exit 0
+fi
 command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
 
 AGENT_NAME="${BCOPENCODE_AGENT:-bcoc-review}"
@@ -328,6 +347,13 @@ bcoc_is_free_model "$MODEL" || FREE_FLAG="false"
   echo "- **RESULT:** $RESULT"
   echo "- **opencode exit:** $RC"
   echo "- **Usage ledger:** \`$USAGE_LOG\`"
+  echo
+  echo "> [!CAUTION]"
+  echo "> **This run was NOT write-restricted.** It proceeded only because"
+  echo "> \`BCOPENCODE_UNSAFE_OPENCODE=1\` was set. On this opencode version the agent's"
+  echo "> \`edit: deny\` frontmatter is ignored and permissions resolve to \`\"*\": allow\`,"
+  echo "> so the critic was able to write files and run shell inside \`$PRIMARY\`."
+  echo "> No edit-guard ran. If the scope matters, check \`git status\` before trusting it."
   echo
   echo "## Critic output"
   echo
