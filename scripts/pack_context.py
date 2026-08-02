@@ -34,11 +34,43 @@ SKIP_DIR_NAMES = {
 }
 
 SECRET_NAME_RE = re.compile(
-    r"(^\.env.*$|(^|/)credentials(\.|$)|\.pem$|\.key$|(^|/)id_rsa|(^|/)id_ed25519|"
+    r"(^\.env.*$|(^|/)credentials(\.|$)|\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|"
+    r"(^|/)id_rsa|(^|/)id_ed25519|(^|/)id_ecdsa|(^|/)id_dsa|"
     r"\.pypirc$|\.netrc$|(^|/)secrets?(\.|$)|(^|/)api[_-]?keys?(\.|$)|"
-    r"\.bettercallmyai\.env$|\.npmrc$|\.git-credentials$)",
+    # Every BetterCall* sibling stores its key in <name>.env — cover the family by
+    # construction, not one name at a time. Omitting this once shipped the user's
+    # OPENROUTER_API_KEY to a third-party model.
+    r"\.bettercall[a-z0-9]*\.env$|"
+    r"(^|/)auth\.json$|(^|/)config\.env$|(^|/)\.docker/config\.json$|"
+    r"\.htpasswd$|\.tfstate$|(^|/)\.terraform(/|$)|"
+    r"\.npmrc$|\.git-credentials$)",
     re.I,
 )
+
+# Content-side backstop: a file whose *name* looks innocent can still hold a key.
+# The fragments are concatenated so this file's own source never contains a literal
+# match — otherwise the skill would refuse to pack its own secret filter for review.
+SECRET_CONTENT_RE = re.compile(
+    b"|".join(
+        [
+            b"sk-" + b"or-v1-[A-Za-z0-9]{16,}",
+            b"sk-" + b"ant-[A-Za-z0-9_-]{20,}",
+            b"sk-" + b"proj-[A-Za-z0-9_-]{20,}",
+            b"ghp_" + b"[A-Za-z0-9]{20,}",
+            b"gho_" + b"[A-Za-z0-9]{20,}",
+            b"github_pat_" + b"[A-Za-z0-9_]{20,}",
+            b"xoxb-" + b"[A-Za-z0-9-]{20,}",
+            b"AKIA" + b"[0-9A-Z]{16}",
+            b"-----BEGIN " + b"[A-Z ]*PRIVATE KEY-----",
+        ]
+    )
+)
+SECRET_CONTENT_SCAN_BYTES = 8192
+
+
+def looks_secret_content(data: bytes) -> bool:
+    """True if the head of this file carries something shaped like a live credential."""
+    return SECRET_CONTENT_RE.search(data[:SECRET_CONTENT_SCAN_BYTES]) is not None
 
 BINARY_EXT = {
     ".png",
@@ -209,7 +241,9 @@ def rank_file(path: Path, rel: str) -> int:
     return score
 
 
-def iter_files(root: Path, patterns: List[re.Pattern]) -> Iterable[Tuple[int, Path, str]]:
+def iter_files(
+    root: Path, patterns: List[str], secret_sink: Optional[List[str]] = None
+) -> Iterable[Tuple[int, Path, str]]:
     for dirpath, dirnames, filenames in os.walk(root):
         # prune dirs in-place
         kept = []
@@ -230,6 +264,8 @@ def iter_files(root: Path, patterns: List[re.Pattern]) -> Iterable[Tuple[int, Pa
             if ignored(rel, patterns):
                 continue
             if is_secret(full, rel):
+                if secret_sink is not None:
+                    secret_sink.append(rel)
                 continue
             if is_binary_path(full):
                 continue
@@ -262,7 +298,8 @@ def pack(
 ) -> Tuple[str, dict]:
     root = root.resolve()
     patterns = load_gitignore(root)
-    ranked = sorted(iter_files(root, patterns), key=lambda x: (-x[0], x[2]))
+    secrets_by_name: List[str] = []
+    ranked = sorted(iter_files(root, patterns, secrets_by_name), key=lambda x: (-x[0], x[2]))
     all_rels = [rel for _, _, rel in ranked]
     tree = build_tree(root, all_rels)
     header = (
@@ -277,6 +314,7 @@ def pack(
     parts = [header]
     included = []
     skipped = []
+    secrets_skipped = []
     truncated_files = []
 
     for score, full, rel in ranked:
@@ -295,6 +333,12 @@ def pack(
             raw = full.read_bytes()
         except OSError as e:
             skipped.append({"path": rel, "reason": str(e)})
+            continue
+        if looks_secret_content(raw):
+            # Never silent: a dropped file must be visible in the meta, or the user
+            # cannot tell "not reviewed" from "reviewed and clean".
+            skipped.append({"path": rel, "reason": "secret-content"})
+            secrets_skipped.append(rel)
             continue
         if looks_binary(raw):
             skipped.append({"path": rel, "reason": "binary"})
@@ -338,16 +382,39 @@ def pack(
         "max_input_tokens": max_input_tokens,
         "included": included,
         "skipped": skipped[:50],
+        # Secret skips are listed in full and separately: `skipped` is truncated to 50,
+        # and "which secrets did you withhold" must never fall off the end of a list.
+        "secrets_skipped_by_name": sorted(secrets_by_name),
+        "secrets_skipped_by_content": sorted(secrets_skipped),
         "truncated_files": truncated_files,
         "budget_exhausted": any(s.get("reason") == "token budget" for s in skipped),
     }
     return body, meta
 
 
+def default_max_input_tokens() -> int:
+    """BCOPENCODE_MAX_INPUT_TOKENS, honouring the old BCMYAI_ name for one release."""
+    val = os.environ.get("BCOPENCODE_MAX_INPUT_TOKENS")
+    if val is None:
+        legacy = os.environ.get("BCMYAI_MAX_INPUT_TOKENS")
+        if legacy is not None:
+            print(
+                "[pack_context] BCMYAI_MAX_INPUT_TOKENS is deprecated; "
+                "use BCOPENCODE_MAX_INPUT_TOKENS.",
+                file=sys.stderr,
+            )
+            val = legacy
+    try:
+        return int(val) if val else 28000
+    except ValueError:
+        print(f"[pack_context] ignoring non-integer max-input-tokens: {val!r}", file=sys.stderr)
+        return 28000
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("scope", help="Directory to pack")
-    ap.add_argument("--max-input-tokens", type=int, default=int(os.environ.get("BCMYAI_MAX_INPUT_TOKENS", "28000")))
+    ap.add_argument("--max-input-tokens", type=int, default=default_max_input_tokens())
     ap.add_argument("--max-file-bytes", type=int, default=120000)
     ap.add_argument("--max-files", type=int, default=80)
     ap.add_argument("--meta-out", default=None, help="Write JSON metadata")
