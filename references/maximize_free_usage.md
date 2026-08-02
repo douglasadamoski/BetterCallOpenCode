@@ -44,13 +44,39 @@ Default `--cap 200` (under 1000 RPD) so a runaway agent cannot burn the whole Op
 bash scripts/opencode_review.sh ... --cap 500
 ```
 
-## Multi-model presets
+## Multi-model presets + free RPM pacing
 
 | Preset | Models (all free) |
 |--------|-------------------|
 | `coding-panel` | Ultra, Super, north-mini-code, gpt-oss-20b |
 | `fast-panel` | nano-30b, gemma-4-26b, ling-3.0-flash, openrouter/free |
 | `nvidia-panel` | Ultra, Super, nano-30b, nano-9b |
+| `--all-free` | Live catalog from OpenRouter |
+
+### Sliding-window free RPM (default multi-model behaviour)
+
+OpenRouter free variants: **20 requests / minute**. The panel runner
+(`scripts/panel_run.py`, used by `multi_review.sh`) does **not** sleep a fixed
+3s between models. Instead:
+
+1. Compute free slots in a **rolling 60s window** (`rate_limit.py`).
+2. Start up to `min(rpm, n_models, max_workers)` reviews **in parallel**.
+3. Each worker calls `limiter.acquire()` **just before** the HTTP request — if the
+   window is full it **blocks until the oldest request ages out**, then fires.
+4. When more models remain after a burst of 20, workers naturally wait ~until
+   that minute’s budget refreshes — no busy polling of OpenRouter.
+
+```bash
+# All free models, parallel under 20 RPM (recommended)
+bash scripts/multi_review.sh \
+  --prompt-file prompt.md --out-dir ./panel --scope . \
+  --all-free --rpm 20 --max-workers 20 --retry-quota
+
+# Fixed sleep sequential (legacy)
+bash scripts/multi_review.sh ... --sequential --sleep 3
+```
+
+Env: `BCOPENCODE_FREE_RPM` (default 20).
 
 ## Timeouts
 

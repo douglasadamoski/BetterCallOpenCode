@@ -117,15 +117,24 @@ Requires `opencode` on PATH and OpenRouter connected. Uses agent `bcoc-review` (
 
 ## Mode C — Multi-model panel
 
+Default path is **parallel under free RPM** (sliding window, OpenRouter **20 req/min**
+on `:free`). Fires as many workers as the budget allows, then waits until slots free
+before more HTTP calls — no fixed sleep between models.
+
 ```bash
 bash "$SKILL_DIR/scripts/multi_review.sh" \
   --prompt-file "$PF" \
   --out-dir "<project>/BetterCallOpenCode/multi_$TS" \
   --scope "<dir>" \
   --preset coding-panel   # or fast-panel | nvidia-panel | --models id1,id2
+# all live free models:
+#   --all-free --rpm 20 --max-workers 10 --retry-quota
+# legacy fixed sleep:
+#   --sequential --sleep 3
 ```
 
-Merge reports: prefer consensus CRITICAL/HIGH; note disagreements.
+See `scripts/rate_limit.py` + `scripts/panel_run.py`. Merge reports: prefer consensus
+CRITICAL/HIGH; note disagreements.
 
 ## Mode D — Staged / short prompts (free time limits)
 
