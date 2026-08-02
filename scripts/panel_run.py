@@ -53,14 +53,18 @@ PRESETS = {
 
 
 def normalize_model(m: str) -> str:
+    """OpenCode form openrouter/<or-id>. Preserve free router id openrouter/free."""
     m = m.strip()
-    while m.startswith("openrouter/"):
-        m = m[len("openrouter/") :]
+    if m in ("free", "openrouter/free", "openrouter/openrouter/free"):
+        return "openrouter/openrouter/free"
+    if m.startswith("openrouter/"):
+        return m if m.count("/") >= 1 else f"openrouter/{m}"
     return f"openrouter/{m}"
 
 
 def is_free(m: str) -> bool:
-    mid = normalize_model(m)[len("openrouter/") :]
+    nm = normalize_model(m)
+    mid = nm[len("openrouter/") :] if nm.startswith("openrouter/") else nm
     return mid.endswith(":free") or mid in ("free", "openrouter/free")
 
 

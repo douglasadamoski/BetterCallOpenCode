@@ -16,6 +16,7 @@ def test_free_ids():
     assert or_client.is_free_model("openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")
     assert or_client.is_free_model("openrouter/free")
     assert or_client.is_free_model("openrouter/openrouter/free")
+    assert or_client.is_free_model("free")
     assert not or_client.is_free_model("openrouter/openai/gpt-4o")
     assert not or_client.is_free_model("anthropic/claude-sonnet-4.5")
 
@@ -27,6 +28,12 @@ def test_normalize():
     oc2, mid2 = or_client.normalize_model("nvidia/x:free")
     assert oc2 == "openrouter/nvidia/x:free"
     assert mid2 == "nvidia/x:free"
+    # Free router must keep API id openrouter/free (not bare "free")
+    oc3, mid3 = or_client.normalize_model("openrouter/free")
+    assert mid3 == "openrouter/free"
+    assert oc3 == "openrouter/openrouter/free"
+    oc4, mid4 = or_client.normalize_model("free")
+    assert mid4 == "openrouter/free"
 
 
 if __name__ == "__main__":

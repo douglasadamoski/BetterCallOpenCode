@@ -59,13 +59,29 @@ def resolve_api_key(explicit: Optional[str] = None) -> str:
 
 
 def normalize_model(model: str) -> Tuple[str, str]:
-    """Return (opencode_form, openrouter_id)."""
+    """Return (opencode_form, openrouter_id).
+
+    OpenCode uses ``openrouter/<openrouter-model-id>``. The free router id on
+    OpenRouter is literally ``openrouter/free``, so OpenCode shows it as
+    ``openrouter/openrouter/free``. Never strip that down to bare ``free`` —
+    the API rejects ``model: "free"`` with 502 Invalid URL.
+    """
     m = (model or "").strip()
-    while m.startswith("openrouter/"):
-        m = m[len("openrouter/") :]
-    while m.startswith("openrouter/"):
-        m = m[len("openrouter/") :]
-    return f"openrouter/{m}", m
+    if not m:
+        return "openrouter/", ""
+    # Bare aliases for the free models router
+    if m in ("free", "openrouter/free", "openrouter/openrouter/free"):
+        return "openrouter/openrouter/free", "openrouter/free"
+    if m.startswith("openrouter/"):
+        or_id = m[len("openrouter/") :]
+    else:
+        or_id = m
+    # Only collapse a *double* openrouter/ prefix, not openrouter/free
+    if or_id.startswith("openrouter/") and or_id != "openrouter/free":
+        # e.g. openrouter/openrouter/foo -> keep or_id as openrouter/foo only when
+        # it was an accidental double provider prefix; free router handled above.
+        pass
+    return f"openrouter/{or_id}", or_id
 
 
 def is_free_model(model: str) -> bool:
