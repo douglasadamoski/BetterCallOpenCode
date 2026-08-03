@@ -92,13 +92,16 @@ fi
 # ---- legacy sequential path ----
 case "$PRESET" in
   coding-panel)
-    MODELS="${MODELS:-nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,cohere/north-mini-code:free,openai/gpt-oss-20b:free}"
+    MODELS="${MODELS:-poolside/laguna-s-2.1:free,nvidia/nemotron-3-super-120b-a12b:free,openrouter/free,nvidia/nemotron-3-nano-30b-a3b:free}"
     ;;
   fast-panel)
-    MODELS="${MODELS:-nvidia/nemotron-3-nano-30b-a3b:free,google/gemma-4-26b-a4b-it:free,inclusionai/ling-3.0-flash:free,openrouter/free}"
+    MODELS="${MODELS:-nvidia/nemotron-3-nano-30b-a3b:free,inclusionai/ling-3.0-flash:free,poolside/laguna-xs-2.1:free,openrouter/free}"
+    ;;
+  deep-panel)
+    MODELS="${MODELS:-nvidia/nemotron-3-ultra-550b-a55b:free,cohere/north-mini-code:free,poolside/laguna-s-2.1:free,openrouter/free}"
     ;;
   nvidia-panel)
-    MODELS="${MODELS:-nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-nano-9b-v2:free}"
+    MODELS="${MODELS:-nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free}"
     ;;
   "") ;;
   *) die "Unknown --preset: $PRESET";;

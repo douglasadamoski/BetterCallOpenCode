@@ -99,7 +99,10 @@ def user_config(home, text):
     (d / "config.env").write_text(text)
 
 
-DEFAULT_MODEL = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+# Changed from nemotron-3-ultra on measured reliability: across 8 full matrices ultra
+# succeeded 4/8 (richest output when it worked, but half its runs were empty content or a
+# timeout) while laguna-s-2.1 succeeded 8/8. See tests/test_model_roster.py.
+DEFAULT_MODEL = "openrouter/poolside/laguna-s-2.1:free"
 
 
 # --- a user config file must work -----------------------------------------------

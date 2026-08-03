@@ -40,6 +40,38 @@ def fetch_models(api_key: str = "") -> list:
     return data.get("data") or []
 
 
+# Free, but NOT a code reviewer. Measured across 8 full 15-model matrices against this
+# repo's own source (see references/openrouter_free_models.md for the table).
+#
+# The dangerous one is the moderation classifier. `nemotron-3.5-content-safety` scored
+# 8/8 OK — a perfect success rate — while returning a 93-character "User Safety: safe"
+# and zero findings. In a consensus panel that is worse than a model that fails: it
+# inflates the success rate, dilutes agreement, and reads as a review that found nothing
+# wrong. A model that always succeeds and never contributes is the hardest kind of
+# useless to notice.
+#
+# Excluded by default from --all-free and the presets. `--include-non-reviewers` opts
+# back in, because "free model that exists" and "model that can review code" are
+# different questions and the roster tool should still be able to answer the first.
+NOT_REVIEWERS = {
+    "nvidia/nemotron-3.5-content-safety:free",   # content moderation classifier
+}
+
+# Free and capable, but so heavily rate-limited on OpenRouter's shared upstream pool that
+# a panel slot spent on them is usually wasted. Same opt-in flag applies.
+UNRELIABLE = {
+    "google/gemma-4-31b-it:free",                # 0/8 OK, 8/8 HTTP 429 upstream
+}
+
+
+def is_reviewer(mid: str) -> bool:
+    return mid not in NOT_REVIEWERS
+
+
+def is_usable(mid: str) -> bool:
+    return mid not in NOT_REVIEWERS and mid not in UNRELIABLE
+
+
 def is_free_entry(m: dict) -> bool:
     mid = m.get("id") or ""
     if mid.endswith(":free") or mid == "openrouter/free":
@@ -59,11 +91,27 @@ def main() -> int:
     ap.add_argument("--refresh", action="store_true", help="Fetch live catalog")
     ap.add_argument("-o", "--output", help="Write JSON snapshot")
     ap.add_argument("--api-key", default=None)
+    ap.add_argument(
+        "--include-non-reviewers",
+        action="store_true",
+        help="Include free models that are not usable code reviewers (a content-moderation "
+             "classifier, and models permanently rate-limited upstream). Excluded by default "
+             "so --all-free spends requests on models that can actually review.",
+    )
     args = ap.parse_args()
 
     key = resolve_api_key(args.api_key)
     models = fetch_models(key)
     free = [m for m in models if is_free_entry(m)]
+    if not args.include_non_reviewers:
+        excluded = [m for m in free if not is_usable(m.get("id") or "")]
+        free = [m for m in free if is_usable(m.get("id") or "")]
+        for m in excluded:
+            mid = m.get("id") or ""
+            why = ("not a code reviewer" if mid in NOT_REVIEWERS
+                   else "rate-limited upstream to the point of being unusable")
+            print(f"list_free_models: excluding {mid} — {why} "
+                  f"(--include-non-reviewers to override)", file=sys.stderr)
     free.sort(key=lambda m: m.get("id") or "")
 
     rows = []

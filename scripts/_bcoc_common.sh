@@ -119,7 +119,13 @@ bcoc_load_config_files
 STATE_DIR="${BCOPENCODE_STATE_DIR:-$HOME/.bettercallopencode}"
 USAGE_LOG="$STATE_DIR/usage.jsonl"
 
-DEFAULT_MODEL="${BCOPENCODE_MODEL:-openrouter/nvidia/nemotron-3-ultra-550b-a55b:free}"
+# Default chosen on measured reliability, not size. Across 8 full matrices against this
+# repo: laguna-s-2.1 succeeded 8/8 with ~6.8k chars and ~12 findings; the previous default
+# nemotron-3-ultra succeeded 4/8 — it produces the richest review when it works (18
+# findings) but failed half the time with empty content or a timeout. For the single-shot
+# default path a failed review costs the user a request and a round trip, so reliability
+# wins. Use --preset deep-panel (or -m …ultra…) when you want depth over certainty.
+DEFAULT_MODEL="${BCOPENCODE_MODEL:-openrouter/poolside/laguna-s-2.1:free}"
 DEFAULT_CAP="${BCOPENCODE_CAP:-200}"
 # 16k default: reasoning free models (gpt-oss, etc.) count thinking toward max_tokens.
 DEFAULT_MAX_TOKENS="${BCOPENCODE_MAX_TOKENS:-16384}"

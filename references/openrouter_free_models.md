@@ -144,3 +144,58 @@ recognised rather than re-diagnosed.
 
 `finish_reason=error` now yields `RESULT=ERROR` rather than `OK`; before that fix a model
 aborting mid-generation was indistinguishable from a clean review.
+
+## Which free models are actually usable — measured
+
+8 full 15-model matrices against this repo's own source, 2026-08-03. `OK` is out of 8;
+`chars`/`finds` are medians over successful runs.
+
+| model | OK | chars | finds | verdict |
+|---|---|---|---|---|
+| `poolside/laguna-s-2.1` | 8/8 | 6 790 | 12 | **default.** Most reliable substantive reviewer |
+| `nvidia/nemotron-3-super-120b-a12b` | 8/8 | 3 976 | 5 | reliable, terser |
+| `openrouter/free` (router) | 7/8 | 10 091 | 13 | reliable and rich |
+| `nvidia/nemotron-3-nano-30b-a3b` | 7/8 | 6 665 | 10 | reliable |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | 7/8 | 6 189 | 7 | reliable |
+| `poolside/laguna-xs-2.1` | 5/8 | 6 886 | 14 | good output, some 429s |
+| `inclusionai/ling-3.0-flash` | 5/8 | 6 082 | 8 | 3 of its failures were the reasoning-burn bug, now fixed |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 4/8 | 9 684 | 18 | **richest when it works, fails half the time.** Was the default; now `deep-panel` only |
+| `nvidia/nemotron-nano-9b-v2` | 4/8 | 2 791 | 5 | thin |
+| `cohere/north-mini-code` | 3/8 | 10 728 | 44 | **most findings per success, least reliable.** Healthy on small prompts, unreliable at ~46k tokens — use Mode D chunking |
+| `nvidia/nemotron-nano-12b-v2-vl` | 3/8 | 2 024 | 10 | vision model; frequently empty |
+| `google/gemma-4-26b-a4b-it` | 2/8 | 4 677 | 10 | frequent 429 |
+| `openai/gpt-oss-20b` | 1/8 | 3 918 | 10 | requires reasoning (rejects `enabled:false` with HTTP 400); heavily 429 |
+| `google/gemma-4-31b-it` | **0/8** | — | — | **excluded.** 8/8 HTTP 429, upstream shared pool |
+| `nvidia/nemotron-3.5-content-safety` | 8/8 | **93** | **0** | **excluded — not a code reviewer.** See below |
+
+### The one that looks perfect and is worthless
+
+`nemotron-3.5-content-safety` scored **8/8 OK**, the joint-best reliability in the table,
+while replying `User Safety: safe` — 93 characters, zero findings. It is a content-
+moderation classifier, not a reviewer.
+
+In a consensus panel that is *worse than a model which fails outright*: it inflates the
+panel's success rate, dilutes agreement between the models that did review, and reads as
+a review that found nothing wrong. A model that always succeeds and never contributes is
+the hardest kind of useless to notice — which is why it is now excluded by name and the
+exclusion is asserted by a test rather than left to judgement.
+
+Both exclusions are announced on stderr and reversible with
+`list_free_models.py --include-non-reviewers`, because "is this free?" and "can this
+review code?" are different questions and the roster tool should still answer the first.
+
+### Presets, rebuilt from this data
+
+| preset | for | models |
+|---|---|---|
+| `coding-panel` | default choice; 30/32 historical OK | laguna-s · nemotron-3-super · openrouter/free · nano-30b |
+| `fast-panel` | small and quick | nano-30b · ling-3.0-flash · laguna-xs · openrouter/free |
+| `deep-panel` | depth over certainty | nemotron-ultra · north-mini-code · laguna-s · openrouter/free |
+| `nvidia-panel` | NVIDIA only | ultra · super · nano-30b · nano-omni |
+
+### Caveat on the sample
+
+8 runs, one day, one codebase, on a free tier whose capacity visibly varied by the hour.
+Reliability figures are indicative, not stable characteristics of the models. The
+`content-safety` and `gemma-4-31b` verdicts are the robust ones: the first is a category
+error and the second failed every single attempt.
