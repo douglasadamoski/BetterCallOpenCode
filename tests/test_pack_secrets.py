@@ -705,3 +705,275 @@ def test_unquoted_passphrases_are_caught_too(tmp_path, sep):
         _assign("db_password", "correct horse battery staple", quote="", sep=sep) + "\n")
     _body, meta = pack_context.pack(tmp_path)
     assert "app.conf" in meta["secrets_skipped_by_content"]
+
+
+# --- Regressions from the hardening round A (remaining secret-filter gaps) --------
+#
+# Every credential-shaped literal below is assembled at RUNTIME, per the invariant at
+# the top of this file: a literal that the packer's own patterns match would make the
+# packer withhold its own test suite from review.
+
+_AZURE_B64 = "A1b2C3d4" * 11 + "=="              # 88 base64 chars + padding
+_JWT = (
+    "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    + "." + "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+    + "." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+)
+_STRIPE_TEST = "sk_" + "test_" + "51H" + "b" * 30
+_LONG = "ABCdef123456!ghijkl"                     # credential-like by every measure
+
+
+def test_azure_connection_string_is_caught(tmp_path):
+    """An Azure storage connection string is a credential with no vendor prefix.
+
+    `Account` + `Key=<base64>==` inside an innocently named `storage.conf` matched no
+    key name and no vendor pattern, so it was packed and sent.
+    """
+    line = (
+        "DefaultEndpointsProtocol=https;AccountName=devstore;"
+        + "Account" + "Key=" + _AZURE_B64 + ";EndpointSuffix=core.windows.net"
+    )
+    (tmp_path / "storage.conf").write_text(line + "\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert "storage.conf" in meta["secrets_skipped_by_content"]
+    assert _AZURE_B64 not in body
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "private_key",          # the list had private_token and client_secret, not this
+        "privateKey",
+        "account_key",
+        "accountKey",
+        "shared_access_key",
+        "access_key",
+        "secret_key",           # Django/Flask SECRET_KEY matched nothing at all
+        "SECRET_KEY",
+        "passphrase",
+        "connection_string",
+        "connectionString",
+        "dsn",
+        "SENTRY_DSN",
+    ],
+)
+def test_missing_credential_key_names_are_now_caught(tmp_path, key):
+    (tmp_path / "app.conf").write_text(_assign(key, _LONG, quote="", sep=": ") + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"missed key: {key}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _STRIPE_TEST,
+        "rk_" + "test_" + "c" * 26,
+    ],
+)
+def test_stripe_test_keys_are_caught(tmp_path, value):
+    """Only the `live` prefixes were covered. A test-mode key is still a live credential
+    against the test API, and it is the one people actually paste into config files."""
+    (tmp_path / "payments.conf").write_text("STRIPE=" + value + "\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert "payments.conf" in meta["secrets_skipped_by_content"]
+    assert value not in body
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Authorization: Bearer " + _JWT,
+        "curl -H 'Authorization: Bearer " + _JWT + "'",
+        "id" + "_token: " + _JWT,          # a bare JWT looks exactly like a dotted path
+        _JWT,
+    ],
+)
+def test_bearer_headers_and_jwts_are_caught(tmp_path, line):
+    """Neither a bare Bearer header nor a three-part JWT was in the pattern set.
+
+    A JWT is especially dangerous for the assignment heuristic: `a.b.c` fullmatches the
+    "this value is a dotted code path" exemption, so the classifier actively DISMISSED it.
+    """
+    (tmp_path / "notes.md").write_text(line + "\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert "notes.md" in meta["secrets_skipped_by_content"], f"missed: {line[:40]}"
+    assert _JWT not in body
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'curl -H "Authorization: Bearer $OPENROUTER_API_KEY" https://example.com',
+        "Authorization: Bearer <your-token>",
+        'headers = {"Authorization": f"Bearer {api_key}"}',
+        "Authorization: Bearer ${TOKEN}",
+        "authorization = request.headers.get('Authorization')",
+    ],
+)
+def test_bearer_placeholders_and_references_are_not_withheld(tmp_path, line):
+    """This repo's own reference docs show the curl form with a shell variable."""
+    (tmp_path / "guide.md").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"
+
+
+@pytest.mark.parametrize("marker", ["|", "|-", ">", ">-", "|+"])
+def test_multiline_block_scalar_secrets_are_caught(tmp_path, marker):
+    """`SECRET_ASSIGN_RE` is single-line, so a YAML block scalar hid the value entirely:
+    the key is on one line and the credential on the next."""
+    (tmp_path / "values.yaml").write_text(
+        "db:\n  pass" + "word: " + marker + "\n    " + _LONG + "\n"
+    )
+    body, meta = pack_context.pack(tmp_path)
+    assert "values.yaml" in meta["secrets_skipped_by_content"]
+    assert _LONG not in body
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["change me on first login", "see the vault for details", "<your-password>"],
+)
+def test_block_scalar_documentation_is_not_withheld(tmp_path, value):
+    (tmp_path / "values.yaml").write_text("pass" + "word: |\n  " + value + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {value}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "private_key = load_pem_private_key(data, password=None)",
+        "secret_key = settings.SECRET_KEY",
+        "connection_string = os.environ['AZURE_CONN']",
+        "self.account_key = cfg.get('account_key')",
+        "dsn = build_dsn(host, port)",
+        "def sign(private_key: str) -> Dict[str, str]:",
+        "access_key = row['access_key']",
+    ],
+)
+def test_new_key_names_do_not_withhold_ordinary_code(tmp_path, line):
+    """Every added key name widens the false-positive surface. Withholding ordinary
+    source punches a "not reviewed" hole in exactly the credential-handling code a
+    reviewer needs to see."""
+    (tmp_path / "app.py").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"
+
+
+def test_new_patterns_are_still_linear(tmp_path):
+    """Same contract as test_secret_scan_is_linear, for the shapes added later.
+
+    The JWT and block-scalar patterns both contain repeated character classes; a
+    near-match followed by noise is the shape that turns those exponential.
+    """
+    import time
+
+    blobs = [
+        b"eyJ" + b"a" * 200_000,                                  # JWT near-match
+        b"pass" + b"word: |\n" + b" " * 200_000,                  # block-scalar near-match
+        b"Account" + b"Key=" + b"A" * 200_000,                    # azure near-match
+        b"Authorization: Bearer " + b"a." * 100_000,
+    ]
+    for blob in blobs:
+        t0 = time.monotonic()
+        pack_context.looks_secret_content(blob)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 5.0, f"content scan took {elapsed:.1f}s — likely backtracking"
+
+
+def test_gitignored_innocent_files_are_recorded_not_invisible(tmp_path):
+    """A gitignored file with an INNOCENT name was skipped before the content scan.
+
+    It was neither packed (correct) nor recorded (wrong): the user could not tell
+    "not reviewed" from "reviewed and clean" for a file that in fact held a token.
+    """
+    (tmp_path / ".gitignore").write_text("local.json\ngenerated/\n")
+    (tmp_path / "local.json").write_text('{"api' + 'Key": "' + _LONG + '"}\n')
+    (tmp_path / "generated").mkdir()
+    (tmp_path / "generated" / "out.txt").write_text("compiled artefact\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+
+    body, meta = pack_context.pack(tmp_path)
+    assert {i["path"] for i in meta["included"]} == {"app.py", ".gitignore"}
+    assert _LONG not in body, "a gitignored credential must never be packed"
+    assert "local.json" in meta["ignored_files"]
+    assert "generated/out.txt" in meta["ignored_files"]
+    assert meta["ignored_files_count"] >= 2
+    assert "local.json" in meta["ignored_files_with_credentials"], (
+        "a credential in a gitignored file must be REPORTED, not invisible"
+    )
+    assert "generated/out.txt" not in meta["ignored_files_with_credentials"]
+
+
+def test_gitignored_secret_named_file_still_reports_by_name_not_as_ignored(tmp_path):
+    """Name classification runs first and must keep owning `.env` — the ignored-files
+    manifest must not quietly take over the more specific report."""
+    (tmp_path / ".gitignore").write_text(".env\n")
+    (tmp_path / ".env").write_text("OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert ".env" in meta["secrets_skipped_by_name"]
+    assert ".env" not in meta["ignored_files"]
+
+
+def test_mirror_reports_ignored_files_too(tmp_path):
+    """The opencode backend reads the mirror, so its accounting must match pack()'s."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / ".gitignore").write_text("local.json\n")
+    (src / "local.json").write_text('{"api' + 'Key": "' + _LONG + '"}\n')
+    (src / "app.py").write_text("x = 1\n")
+    dest = tmp_path / "mirror"
+    meta = pack_context.mirror(src, dest)
+    present = sorted(p.name for p in dest.rglob("*") if p.is_file())
+    assert "local.json" not in present
+    assert "local.json" in meta["ignored_files"]
+    assert "local.json" in meta["ignored_files_with_credentials"]
+
+
+def test_directory_only_gitignore_patterns_do_not_swallow_files(tmp_path):
+    """`multi_*/` means a DIRECTORY named multi_*, not any file starting with multi_.
+
+    Dropping the trailing slash made this repo's own `scripts/multi_review.sh` count as
+    gitignored, so it was never packed and never reviewed. The bug was invisible until
+    gitignore skips started being recorded — which is the whole argument for recording
+    them.
+    """
+    (tmp_path / ".gitignore").write_text("multi_*/\nbuildcache/\n*.log\n")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "multi_review.sh").write_text("echo hi\n")
+    (tmp_path / "multi_run").mkdir()
+    (tmp_path / "multi_run" / "report.md").write_text("old report\n")
+    (tmp_path / "app.log").write_text("noise\n")
+
+    _body, meta = pack_context.pack(tmp_path)
+    included = {i["path"] for i in meta["included"]}
+    assert "scripts/multi_review.sh" in included, "a real source file was hidden by a dir rule"
+    assert "multi_run/report.md" not in included
+    assert "multi_run/report.md" in meta["ignored_files"]
+    assert "app.log" in meta["ignored_files"], "plain patterns must still ignore files"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "`API" + "_KEY=` is how the suite guarantees no key is resolvable; a stray one breaks it",
+        "Set `pass" + "word=` and the container refuses to start with a helpful message",
+    ],
+)
+def test_empty_assignment_in_a_markdown_code_span_is_prose(tmp_path, line):
+    """A backtick right after the separator CLOSES the span: the assignment has no value
+    and the rest of the line is prose. Stripping the backtick and classifying the
+    sentence withheld a whole file from its own review."""
+    (tmp_path / "CONTRIBUTING.md").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"
+
+
+def test_a_credential_quoted_in_a_code_span_is_still_caught(tmp_path):
+    """The fix above must not exempt the span that actually CONTAINS the credential."""
+    (tmp_path / "README.md").write_text(
+        "Use `" + _assign("api_key", _LONG, quote="", sep="=") + "` in production.\n"
+    )
+    _body, meta = pack_context.pack(tmp_path)
+    assert "README.md" in meta["secrets_skipped_by_content"]

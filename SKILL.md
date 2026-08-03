@@ -40,17 +40,53 @@ If missing, skip silently. Regenerate:
 
 ## Core principles
 
-1. **Critic does not change the codebase.** `or-api` is a plain HTTP endpoint: no
-   filesystem, no shell, no reach into your machine — it sees only the packed text this
-   skill sends. `--backend opencode` runs an agent locally, restricted by an agent file
-   whose deny rules are **verified resolved before every run** (`RESULT=REFUSED` if not).
-   It is restricted, **not sandboxed** — see `references/opencode_notes.md` for exactly
-   what that does and does not cover. Never pass `--auto`.
+1. **Critic does not change the codebase — and neither backend is a sandbox.**
+   - `or-api` (default) is a plain HTTPS POST to OpenRouter: no filesystem, no shell, no
+     reach into your machine. The model sees only the packed text this skill sends.
+   - `--backend opencode` runs an agent **locally**, pointed at a **filtered mirror** of
+     the scope (`pack_context.py --mirror-to`), never the raw tree. Its
+     `edit`/`bash`/`webfetch`/`task`/`external_directory` deny rules are re-verified
+     against `opencode agent list` **before every run** — `RESULT=REFUSED`, nothing spent,
+     if they do not resolve. It is restricted, **not sandboxed**: opencode still persists
+     the reviewed source to `~/.local/share/opencode/{opencode.db,log,snapshot}`, outside
+     the scope. See `references/opencode_notes.md` for the live measurements.
+   - Both run under **your** `PATH`. A compromised `python3` or `opencode` defeats every
+     control described here. Never pass `--auto`.
 2. **Free-only by default.** Models must end with `:free` or be `openrouter/free`. Non-free → `RESULT=PAID_BLOCKED` unless the user **explicitly** asks to spend credits and you pass `--allow-paid` / `BCOPENCODE_ALLOW_PAID=1`.
 3. **Be broad.** Intent-first; invent tests; do not hand over the suite to rubber-stamp.
-4. **Respect free limits.** On AUTH/CAP/QUOTA: **STOP** — no retry loops. Preflight shows free bucket (**50 vs 1000 RPD**) and credits.
+4. **Respect free limits.** On AUTH/CAP/QUOTA: **STOP** — no retry loops. Preflight shows
+   free bucket (**50 vs 1000 RPD**) and credits. The local cap is check-then-act per run —
+   see the note in Mode C.
 5. **Prefer `or-api`** (1 free request per review). Use `--backend opencode` only when agentic exploration is wanted.
 6. **Single pass default.** Multi-model / staged only when asked or the tree is huge.
+
+## What is guaranteed, and what is not
+
+Say these plainly to the user if they ask what the skill protects:
+
+- **Secrets are withheld best-effort, and what was withheld is always recorded.** The
+  filter is a catalogue of vendor token shapes (`SECRET_CONTENT_RE` in
+  `scripts/pack_context.py` is the authoritative list) plus an assignment heuristic that
+  classifies the *value*, not just the key name. It covers whole-file names (`.env`,
+  `*.pem`, `auth.json`, …) and hidden directories (`.ssh`, `.aws`, …).
+  **Every new vendor prefix is a miss until it is patched, and adversarial encoding will
+  get through.** The part that *is* guaranteed: every file withheld as a secret is listed
+  in the pack metadata (`secrets_skipped_by_name` / `secrets_skipped_by_content`, both
+  untruncated), so "not reviewed" is never indistinguishable from "reviewed and clean".
+- **The finished report is scanned, and only high-confidence shapes are masked.** The
+  skill's own diagnostics go through the full redactor (`scripts/redact.py`); the finished
+  report — front matter, critic output and stderr blocks alike — is scanned with the
+  **high-confidence** rules only (a vendor prefix plus 16+ opaque characters). A hit is
+  masked in place, announced in a `[!CAUTION]` block inside the report, and reported as
+  `SECRET_SCAN=MASKED` on stderr. On `MASKED`, **tell the user and tell them to rotate that
+  credential.** On `SECRET_SCAN=UNVERIFIED` the scan could not run at all — say so, and tell
+  them to read the report before committing it. The `RESULT=` word is deliberately unchanged
+  in both cases: this is not a reason to retry and spend again.
+  The heuristic rules are *not* applied to the critic's prose, because they fire on ordinary
+  argument about credentials and would mangle the review.
+- **Reviewed code leaves your machine either way.** `or-api` sends it to OpenRouter;
+  `opencode` sends it to OpenRouter *and* leaves a copy in opencode's local state.
+- Full statement: `SECURITY.md`.
 
 ## Configuration
 
@@ -113,19 +149,37 @@ rm -f "$PF"
 bash "$SKILL_DIR/scripts/opencode_review.sh" ... --backend opencode
 ```
 
-Requires `opencode` on PATH and OpenRouter connected. Uses agent `bcoc-review`, whose
-`edit`/`bash`/`webfetch`/`task` deny rules are checked against `opencode agent list`
-before the run — if they do not resolve, you get `RESULT=REFUSED` and nothing is spent.
+Requires `opencode` on PATH and OpenRouter connected. What actually happens:
+
+1. The scope is scanned for **executable code under `.opencode/`** — extensions
+   `js/cjs/mjs/jsx/ts/mts/cts/tsx/wasm/node`, at **any depth**. Present → `RESULT=REFUSED`,
+   nothing spent.
+2. `pack_context.py --mirror-to` builds a **filtered mirror** of the scope: same secret,
+   binary, size and hidden-directory rules as the `or-api` pack. The agent is pointed at
+   the mirror (`--dir`), never at your repo, and is not told the real path.
+3. Agent `bcoc-review` is reinstalled from `agents/bcoc-review.md`, then
+   `edit`/`bash`/`webfetch`/`task`/`external_directory` are checked against
+   `opencode agent list` (`verify_agent_permissions.py`, last-global-match-wins, mode must
+   be `all`). Not all deny → `RESULT=REFUSED`, nothing spent.
+4. The run is `--pure` with `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `OPENCODE_PERMISSION`
+   set, under a wall-clock `timeout`.
 
 > [!IMPORTANT]
-> **Restricted, not sandboxed.** Verified on opencode 1.18.11: the critic cannot edit
-> files, run shell, or fetch the web, and a reviewed repo cannot re-enable those via its
-> own `.opencode/` agent or `opencode.json`. Two things remain true anyway:
+> **Restricted, not sandboxed.** Measured on opencode 1.18.11 against a deliberately
+> hostile repo: the critic could not edit files, create files, or run shell, and the repo
+> could not re-enable those with its own `.opencode/` agent, `opencode.json` or
+> `AGENTS.md`. Re-verify after an opencode upgrade — this is a measurement, not a
+> contract the vendor offers. What is **not** covered:
 > - opencode persists the reviewed source and prompts to
 >   `~/.local/share/opencode/{opencode.db,log,snapshot}` — outside the scope, unencrypted.
-> - A repo shipping `.opencode/plugin/*.js` gets that code **executed** by opencode
->   before any permission layer exists. No flag prevents it, so the skill **refuses**
->   such a scope (`RESULT=REFUSED`). Review those with `--backend or-api`.
+> - `external_directory allow …/tool-output/*` is appended after the denies, so writes
+>   there remain permitted.
+> - Project plugins are executed by opencode **before** any agent, permission or model
+>   exists, and no flag prevents it. The **mirror** is what keeps them out of reach
+>   (it prunes hidden directories, so `.opencode` never reaches the tree opencode runs
+>   against — `--dir <raw repo>` executes the plugin, `--dir <mirror>` does not). The
+>   step-1 refusal is defence in depth for a future path that forgets the mirror.
+> - Everything runs under your `PATH`.
 
 Prefer `--backend or-api`: 1 free request per review, and genuinely no filesystem access.
 
@@ -183,17 +237,25 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | QUOTA | Free RPD/RPM or 402/429 — **STOP**, wait (1000 RPD after $10 top-up; still 20 RPM) |
 | TIMEOUT | Smaller pack / stages; retry **once** |
 | PAID_BLOCKED | Switch to `:free` or get explicit paid consent |
-| REFUSED | A safety gate refused **before spending anything** — the scope ships `.opencode/plugin/*.js` (opencode would execute it), or the agent's deny rules did not resolve. Read the stderr reason. **Do not** work around it; switch to `--backend or-api` and tell the user why |
+| REFUSED | An `opencode`-backend safety gate refused **before spending anything** — the scope ships executable code under `.opencode/`, or the agent's deny rules did not resolve. Read the stderr reason. **Do not** work around it; switch to `--backend or-api` and tell the user why |
 | BAD_ARGS | A bad argument or a failed pre-flight gate. **Nothing was spent** — fix the invocation and re-run freely |
-| UNREACHABLE | Reached OpenRouter but not the model — network failure, or upstream 502/503/504. Not billed. Retry **once**; if it persists the provider is down |
-| ERROR | The request was rejected or came back unusable — including a 404/405, which means the **model id is wrong or retired**. Check the id against `list_free_models.py` before retrying |
+| UNREACHABLE | Either the request never left your machine (DNS/TCP/TLS failure) or OpenRouter answered **502/503/504**. Not billed. Retry **once**; if it persists the provider is down |
+| ERROR | The request was rejected or came back unusable — including a 404/405, which means the **model id is wrong or retired** (the API *did* answer). Check the id against `list_free_models.py` before retrying |
 | INTERRUPTED | Ctrl-C / SIGTERM. The request was already launched, so it is **counted as billed** — the answer was lost, not the quota |
-| PARTIAL | Multi-model panel: some models failed. **Name which ones** in your summary — a merged critique missing N of M opinions is not a complete review |
+| PARTIAL | Multi-model panel: at least one model produced a review and at least one failed. **Name which ones** in your summary — a merged critique missing N of M opinions is not a complete review. If *every* model fails you get that failure's word, not PARTIAL |
+
+The `opencode` backend classifies from the exit code and stderr only, so it emits just
+`OK`/`TIMEOUT`/`QUOTA`/`AUTH`/`ERROR`/`REFUSED` — never `TRUNCATED` or `UNREACHABLE`.
+Those two come from the `or-api` client's HTTP layer.
 
 ## Report back
 
 Summarize accepted vs rejected; scripts run; report path(s); **usage today vs cap**
 (`scripts/opencode_usage.sh`); free bucket if preflight ran; which models replied.
+
+If the report header shows `secrets_withheld=N`, say so: those files were **not reviewed**,
+and the user may want to review them another way. Note that `opencode_usage.sh` counts
+*all* ledger rows for the day, while the cap counts only the rows marked `billed`.
 
 ## Sibling skills
 

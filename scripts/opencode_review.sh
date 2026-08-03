@@ -264,6 +264,70 @@ Be concise. You will get follow-up turns for other concerns.
 "
 fi
 
+# --- report hygiene --------------------------------------------------------------
+# `bcoc_redact` was only ever applied to the stderr <details> block, never to $CONTENT —
+# the model's own critique. A model that read a credential and echoed it wrote that
+# credential into the report verbatim, in the user's project directory.
+#
+# The fix runs over the FINISHED report rather than over $CONTENT, so it covers both
+# backends and every section (front matter, critic output, stderr blocks) through one
+# code path instead of two heredocs.
+#
+# It masks ONLY the high-confidence vendor shapes — a vendor prefix plus 16+ opaque
+# characters — and never the heuristic rules, which fire on ordinary argument about
+# credentials. See the long justification in scripts/redact.py; the short version is that
+# a scan-only warning is not a control (the secret is still in a file the user is about to
+# commit), and a full redaction pass mangles the review it is supposed to protect.
+# Every substitution is announced in a [!CAUTION] block inside the report itself.
+#
+# The RESULT word is deliberately NOT changed: its vocabulary is a documented contract in
+# SKILL.md, and the closest existing word (ERROR) would tell Claude to retry and spend
+# again. The machine-readable signal is the `SECRET_SCAN=` line on stderr.
+BCOC_REPORT_SECRETS="none"
+
+bcoc_guard_report() {  # $1 = path to the finished report
+  local f="$1" rc
+  if [[ ! -f "${_BCOC_SCRIPTS:-}/redact.py" ]] || ! command -v python3 >/dev/null 2>&1; then
+    BCOC_REPORT_SECRETS="unverified"
+    echo "bcoc: WARNING — could not scan the report for credential shapes (redact.py or python3 unavailable). Read $f before committing it." >&2
+    echo "SECRET_SCAN=UNVERIFIED" >&2
+    return 0
+  fi
+  python3 "${_BCOC_SCRIPTS}/redact.py" --guard "$f"
+  rc=$?
+  case "$rc" in
+    0) BCOC_REPORT_SECRETS="clean" ;;
+    3) BCOC_REPORT_SECRETS="masked"
+       echo "bcoc: WARNING — the report carried a credential-shaped string. It has been masked in $f and a [!CAUTION] block added. Treat that credential as COMPROMISED and rotate it." >&2
+       echo "SECRET_SCAN=MASKED" >&2 ;;
+    *) BCOC_REPORT_SECRETS="unverified"
+       echo "bcoc: WARNING — the report secret scan failed; read $f before committing it." >&2
+       echo "SECRET_SCAN=UNVERIFIED" >&2 ;;
+  esac
+  return 0
+}
+
+# Reports land in the USER'S project (SKILL.md sends them to
+# <project>/BETTERCALLOPENCODE_REVIEW_*.md and <project>/BetterCallOpenCode/multi_*/).
+# This repo gitignores those names, which only ever protected its own self-review. A
+# report quotes source and error text, so committing one unread is a real disclosure.
+#
+# WARN only. The user's .gitignore is theirs; a tool that edits it has decided something
+# it was not asked to decide, and doing so silently is worse than the leak it prevents.
+bcoc_warn_if_not_gitignored() {  # $1 = path to the finished report
+  local f="$1" abs top
+  command -v git >/dev/null 2>&1 || return 0
+  abs="$(bcoc_realpath "$f" 2>/dev/null)" || abs="$f"
+  [[ -n "$abs" ]] || abs="$f"
+  top="$(git -C "$(dirname "$abs")" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [[ -n "$top" ]] || return 0
+  # check-ignore exits 0 when the path IS ignored, 1 when it is not, >1 on error.
+  git -C "$top" check-ignore -q "$abs" 2>/dev/null && return 0
+  [[ $? -gt 1 ]] && return 0
+  echo "bcoc: WARNING — $abs is tracked-able inside the git repo at $top and is NOT gitignored; reviews quote your source, so add 'BETTERCALLOPENCODE_*.md' and 'BetterCallOpenCode/' to $top/.gitignore before you commit." >&2
+  return 0
+}
+
 # --- write the report and the ledger row -----------------------------------------
 # Ledger FIRST, then the report: a failed report write must not lose the record of a
 # request that was already paid for. Both are guarded so neither can abort the run
@@ -272,10 +336,14 @@ emit_report() {  # stdin = report body
   TMP_REPORT="$(mktemp "$OUT_DIR/.bcoc_report.XXXXXX")" || {
     echo "bcoc: cannot create temp report in $OUT_DIR" >&2; return 1; }
   cat > "$TMP_REPORT" || { echo "bcoc: failed writing report body" >&2; return 1; }
+  # Scan and mask BEFORE the report reaches its final name. A credential must never be
+  # readable at $OUT, not even for the width of an mv.
+  bcoc_guard_report "$TMP_REPORT"
   # mv renames over a symlink instead of writing through it, and never leaves a
   # half-written report where a complete one used to be.
   mv -f "$TMP_REPORT" "$OUT" || { echo "bcoc: failed to move report into place" >&2; return 1; }
   TMP_REPORT=""
+  bcoc_warn_if_not_gitignored "$OUT"
   return 0
 }
 
@@ -322,9 +390,16 @@ if [[ "$BACKEND" == "or-api" ]]; then
 import json,sys
 d=json.load(open(sys.argv[1]))
 extra=""
-if d.get("secrets_skipped_by_name") or d.get("secrets_skipped_by_content"):
+# Include gitignored files that were content-scanned and found to hold a credential.
+# They live in their own list because "would have been packed but for its content" is a
+# different claim from "withheld" — but the operator summary must still count them, or a
+# credential in a gitignored file is invisible in the one line most people read.
+_ign = d.get("ignored_files_with_credentials", [])
+if d.get("secrets_skipped_by_name") or d.get("secrets_skipped_by_content") or _ign:
     n=len(d.get("secrets_skipped_by_name",[]))+len(d.get("secrets_skipped_by_content",[]))
     extra=f" secrets_withheld={n}"
+    if _ign:
+        extra += f" (+{len(_ign)} in gitignored files)"
 print(f"files={d.get('files_included')}/{d.get('files_seen')} "
       f"tokens_est={d.get('tokens_est')} "
       f"budget_exhausted={d.get('budget_exhausted')}{extra}")

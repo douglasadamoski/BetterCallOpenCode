@@ -53,8 +53,14 @@ def main() -> int:
     withheld_by_name: List[str] = []
     pruned: List[str] = []
     symlinks: List[str] = []
+    ignored_files: List[str] = []
+    ignored_with_creds: List[str] = []
+    ignored_total = [0]
     ranked = sorted(
-        pack_context.iter_files(root, patterns, withheld_by_name, pruned, symlinks),
+        pack_context.iter_files(
+            root, patterns, withheld_by_name, pruned, symlinks,
+            ignored_files, ignored_with_creds, ignored_total,
+        ),
         key=lambda x: (-x[0], x[2]),
     )
 
@@ -123,6 +129,11 @@ def main() -> int:
         "secrets_skipped_by_content": sorted(withheld_by_content),
         "pruned_dirs": sorted(pruned),
         "symlinks_skipped": sorted(symlinks),
+        # Gitignored files are withheld from the chunks too, and must be just as
+        # visible here as in pack()'s meta — same "never silent" contract.
+        "ignored_files": sorted(ignored_files),
+        "ignored_files_count": ignored_total[0],
+        "ignored_files_with_credentials": sorted(ignored_with_creds),
     }
     print(json.dumps(out, indent=2))
     return 0

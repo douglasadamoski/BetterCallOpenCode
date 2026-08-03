@@ -65,27 +65,13 @@ _or_client = importlib.util.module_from_spec(_or_spec)
 _or_spec.loader.exec_module(_or_client)
 
 
-# Mirrors bcoc_redact in _bcoc_common.sh. The error snippet below is written into
-# summary.csv INSIDE the user's project — the file most likely to be committed unread —
-# and the old comment claimed it was redacted while nothing redacted it.
-_REDACT = [
-    (re.compile(rb"(?i)bearer\s+[A-Za-z0-9._~+/-]{8,}"), b"Bearer ***"),
-    (re.compile(rb"(?i)authorization:\s*[A-Za-z0-9._~+/-]{8,}"), b"Authorization: ***"),
-    (re.compile(rb"sk-(or-v1|ant|proj)-[A-Za-z0-9_-]+"), b"sk-***"),
-    (re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}"), b"gh*_***"),
-    (re.compile(rb"github_pat_[A-Za-z0-9_]{20,}"), b"github_pat_***"),
-    (re.compile(rb"xox[bpasr]-[A-Za-z0-9-]{10,}"), b"xox*-***"),
-    (re.compile(rb"(AKIA|ASIA)[0-9A-Z]{16}"), b"AKIA***"),
-    (re.compile(rb"AIza[A-Za-z0-9_-]{30,}"), b"AIza***"),
-    (re.compile(rb"(?i)(api[_-]?key|access[_-]?token|secret)([\"'=: ]+)[^\s\"']+"), rb"\1\2***"),
-]
-
-
-def redact(text: str) -> str:
-    b = (text or "").encode("utf-8", "replace")
-    for rx, sub in _REDACT:
-        b = rx.sub(sub, b)
-    return b.decode("utf-8", "replace")
+# Redaction has ONE implementation. This module used to carry its own pattern list
+# "mirroring" bcoc_redact in _bcoc_common.sh; the two lists were not the same, so a token
+# family one masked the other let through — and the error snippet below is written into
+# summary.csv INSIDE the user's project, the file most likely to be committed unread.
+# scripts/redact.py is the authority; the shell function pipes through the same file.
+# tests/test_redaction.py asserts the two paths produce identical output.
+from redact import redact  # noqa: E402,F401  (re-exported: callers import it from here)
 
 
 def _cap_used_today() -> Optional[int]:
@@ -164,9 +150,14 @@ def parse_report(path: Path) -> Dict[str, str]:
         "total_tokens": "",
         "cost": "",
     }
-    if not path.is_file():
+    # is_file() then read_text() is both a TOCTOU (the file can vanish between them)
+    # and blind to permissions. parse_report runs AFTER the request was billed, inside a
+    # ThreadPoolExecutor, so a PermissionError surfaced as a bare future failure: the
+    # paid-for result was lost and no ledger row explained why. Read defensively.
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return out
-    text = path.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"^\- \*\*RESULT:\*\* (\S+)", text, re.M)
     if m:
         out["result"] = m.group(1)

@@ -5,4 +5,6 @@ import sys
 
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 n = len(d.get("secrets_skipped_by_name", [])) + len(d.get("secrets_skipped_by_content", []))
-print(f"files={d.get('files_copied')} secrets_withheld={n}")
+ign = len(d.get("ignored_files_with_credentials", []))
+print(f"files={d.get('files_copied')} secrets_withheld={n}"
+      + (f" (+{ign} in gitignored files)" if ign else ""))

@@ -160,6 +160,14 @@ try:
                 o = json.loads(line)
             except Exception:
                 continue          # a malformed line is skipped, never fatal
+            if not isinstance(o, dict):
+                # A line that is VALID json but not an object (`null`, `[]`, `12345`)
+                # survives the guard above and then dies on o.get() with AttributeError.
+                # python3 exits 1, this function prints nothing, the caller's
+                # USED="$(bcoc_cap_used | ...)" becomes empty, and ${USED:-0} reads as 0
+                # — silently disabling the daily cap. Exactly what the UNAVAILABLE
+                # sentinel exists to prevent, reached by a different door.
+                continue
             if o.get("day") != day:
                 continue
             billed = o.get("billed")
@@ -278,21 +286,63 @@ bcoc_is_free_model() {
 }
 
 # --- redaction ------------------------------------------------------------------
-# Kept deliberately broad; it is applied to text that is about to be shown or written.
-# The old version caught 2 token families out of 8 and half-redacted `sk-or-v1-a_b`
-# because its character class excluded _ and -.
-bcoc_redact() {
+# ONE redactor, not two. This used to be a standalone `sed` pipeline that duplicated the
+# pattern list in panel_run.py; the two lists were not the same, so text one of them
+# masked the other passed through. scripts/redact.py is now the single authority for what
+# a credential looks like, and both this function and panel_run.py go through it.
+#
+# The NAME and the interface (stdin -> stdout) are unchanged: several call sites in
+# opencode_review.sh pipe into it.
+#
+# FAIL CLOSED. If python3 is missing, redact.py is missing, or the helper exits non-zero,
+# this falls back to a local sed pass rather than letting the text through unredacted. The
+# fallback is a strict SUBSET of redact.py — it exists to redact *something*, not to be a
+# second authority — and tests/test_redaction.py asserts it never passes a vendor token.
+_bcoc_redact_fallback() {
+  # No GNU-only `I` flag: on BSD sed that flag is an error, sed exits without writing,
+  # and "nothing came out" is indistinguishable from "nothing needed redacting".
+  # Case variants are spelled out instead, so this behaves the same on macOS.
   sed -E \
-    -e 's/[Bb]earer[[:space:]]+[A-Za-z0-9._~+/-]{8,}/Bearer ***/g' \
-    -e 's/[Aa]uthorization:[[:space:]]*[A-Za-z0-9._~+/-]{8,}/Authorization: ***/g' \
-    -e 's/(api[_-]?key|access[_-]?token|secret)(["=: ]+)[^[:space:]"'"'"']+/\1\2***/Ig' \
-    -e 's/sk-or-v1-[A-Za-z0-9_-]+/sk-or-v1-***/g' \
-    -e 's/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g' \
-    -e 's/sk-proj-[A-Za-z0-9_-]+/sk-proj-***/g' \
+    -e 's/[Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+[A-Za-z0-9._~+/=-]{8,}/Bearer ***/g' \
+    -e 's/[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*([A-Za-z]+[[:space:]]+)?[A-Za-z0-9._~+/=-]{8,}/Authorization: ***/g' \
+    -e 's/([Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])(["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^[:space:]"'"'"'`,;)]{4,}/\1\2***/g' \
+    -e 's/sk-or-v1-[A-Za-z0-9_-]{16,}/sk-or-v1-***/g' \
+    -e 's/sk-ant-[A-Za-z0-9_-]{20,}/sk-ant-***/g' \
+    -e 's/sk-proj-[A-Za-z0-9_-]{20,}/sk-proj-***/g' \
+    -e 's/(sk|rk)[-_]live[-_][A-Za-z0-9]{16,}/sk_live_***/g' \
     -e 's/gh[pousr]_[A-Za-z0-9]{20,}/gh*_***/g' \
     -e 's/github_pat_[A-Za-z0-9_]{20,}/github_pat_***/g' \
     -e 's/xox[bpasr]-[A-Za-z0-9-]{10,}/xox*-***/g' \
+    -e 's/xapp-[A-Za-z0-9-]{10,}/xapp-***/g' \
     -e 's/(AKIA|ASIA)[0-9A-Z]{16}/\1***/g' \
     -e 's/AIza[A-Za-z0-9_-]{30,}/AIza***/g' \
-    -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----/-----BEGIN PRIVATE KEY [REDACTED]-----/g'
+    -e 's/glpat-[A-Za-z0-9_-]{16,}/glpat-***/g' \
+    -e 's/PuTTY-User-Key-Fil[e](-[0-9]+)?(:[[:space:]]*[^[:space:]]+)?/[REDACTED PUTTY KEY FILE]/g' \
+    -e 's#([a-zA-Z][a-zA-Z0-9+.-]{1,20}://)[^/[:space:]:@]{0,64}:[^/[:space:]:@]{1,64}@#\1***@#g' \
+    -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----/[REDACTED PRIVATE KEY BLOCK]/g'
+}
+
+bcoc_redact() {
+  local _rin _rout
+  _rin="$(mktemp "${TMPDIR:-/tmp}/bcoc_redact.XXXXXX" 2>/dev/null)" || _rin=""
+  if [[ -z "$_rin" ]]; then
+    # Cannot buffer, so cannot retry — stream straight through the fallback.
+    _bcoc_redact_fallback
+    return 0
+  fi
+  _rout="${_rin}.out"
+  cat > "$_rin"
+  # The helper's output goes to a second file and is only emitted on a clean exit: a
+  # helper that dies mid-write must not leave a half-redacted head on stdout followed by
+  # the fallback's full output.
+  if [[ "${BCOPENCODE_FORCE_SED_REDACT:-}" != "1" ]] \
+     && [[ -f "${_BCOC_SCRIPTS:-}/redact.py" ]] \
+     && command -v python3 >/dev/null 2>&1 \
+     && python3 "${_BCOC_SCRIPTS}/redact.py" < "$_rin" > "$_rout" 2>/dev/null; then
+    cat "$_rout"
+  else
+    _bcoc_redact_fallback < "$_rin"
+  fi
+  rm -f "$_rin" "$_rout" 2>/dev/null
+  return 0
 }

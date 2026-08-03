@@ -175,12 +175,42 @@ imported and its top-level code executed. Measured on 1.18.11 with a real
 | `opencode run --pure` + `OPENCODE_DISABLE_PROJECT_CONFIG=1` | **yes** |
 
 This runs before any agent, permission or model exists, so no permission layer can stop
-it. **There is no flag that prevents it.** The only defence available to this skill is to
-refuse the scope, which `opencode_review.sh` now does (`RESULT=REFUSED`) when it finds
-`*.js`/`*.ts`/`*.mjs` under the scope's `.opencode/`.
+it. **There is no flag that prevents it.**
 
 The lesson generalises: **verify an enforcement claim with the command the skill actually
 runs.** A cheap proxy (`agent list`) gave the opposite answer to the real one (`run`).
+
+## RE-MEASUREMENT (2026-08-03): the mirror is the control, the refusal is defence in depth
+
+The measurements above were taken with opencode pointed at the reviewed repository. The
+skill no longer does that. `opencode_review.sh` builds a filtered mirror
+(`pack_context.py --mirror-to`) and passes `--dir <mirror>`. That changes the answer, so it
+had to be re-measured — a gate whose necessity is assumed rather than tested is how
+over-refusal creeps in:
+
+| invocation | plugin executed? |
+|---|---|
+| `opencode run --dir <hostile raw repo>` | **yes** |
+| `opencode run --dir <filtered mirror>` | **no** |
+
+The mirror is built by `iter_files()`, which prunes hidden directories wholesale, so
+`.opencode` never reaches the tree opencode runs against. **The mirror is the primary
+control.** The scope refusal is defence in depth: it catches a future code path that
+forgets to build the mirror, and it declines to point an agent at a repo that ships plugin
+code in the first place.
+
+Because it is no longer the primary control, the refusal was narrowed from "any file under
+`.opencode/`" — which also refused ordinary OpenCode projects that merely ship
+`.opencode/agents/*.md`, a large false-positive blast radius for no measured gain. The
+current rule is **executable extensions at any depth** under the scope's `.opencode/`:
+
+```
+js  cjs  mjs  jsx  ts  mts  cts  tsx  wasm  node
+```
+
+Depth is unbounded on purpose. The original gate used `-maxdepth 2` and three extensions,
+and `plugin/nested/evil.js`, `.cjs`, `.mts` and a plural `plugins/` all walked straight
+past it.
 
 ## What IS verified to work, end to end
 
@@ -202,10 +232,27 @@ The agent file's `mode: all` + nested `permission:`/`tools:` blocks are what hol
 `OPENCODE_CONFIG_DIR` is loaded last and permission matching is last-match-wins — so the
 skill's denies outrank the repo's allows.
 
+Note what this experiment does **not** say. It says the model did not succeed in editing,
+creating or executing on opencode 1.18.11 with this configuration. It is a measurement of a
+specific version, not a guarantee the vendor offers, and the CORRECTION above is what
+happens when a measurement is taken with the wrong command. Re-run it after an upgrade.
+
 ## Still not covered
 
-opencode persists reviewed source and prompts to `~/.local/share/opencode/opencode.db`,
-`log/opencode.log` and `snapshot/` — outside the scope, unencrypted, indefinitely
-(`strings opencode.db | grep <your code>` finds it). And
-`external_directory allow …/tool-output/*` is appended after the denies, so writes there
-remain permitted. Use `--backend or-api` if either matters.
+- **Persistence.** opencode persists reviewed source and prompts to
+  `~/.local/share/opencode/opencode.db`, `log/opencode.log` and `snapshot/` — outside the
+  scope, unencrypted, indefinitely (`strings opencode.db | grep <your code>` finds it).
+  Nothing in this skill cleans that up.
+- **`tool-output/`.** `external_directory allow …/tool-output/*` is appended after the
+  denies, so writes there remain permitted. `verify_agent_permissions.py` reports such
+  scoped allows on stderr rather than pretending they do not exist; only a *global* allow
+  flips the verdict.
+- **PATH.** Everything above assumes the `opencode` and `python3` that run are the ones you
+  think they are. A compromised binary earlier on `PATH` defeats every layer here, and no
+  in-process check can detect it. That is the accepted trust boundary for a developer tool
+  — but it is a boundary, not an oversight.
+- **The remote side.** The model is a third party. Free `:free` variants in particular have
+  their own data-handling terms on OpenRouter and its upstream providers.
+
+Use `--backend or-api` if the local-persistence item matters. Nothing here removes the
+last item: both backends send your code to OpenRouter.

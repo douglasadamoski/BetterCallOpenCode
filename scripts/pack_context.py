@@ -80,6 +80,11 @@ SECRET_CONTENT_RE = re.compile(
             b"sk-" + b"live-[A-Za-z0-9]{16,}",
             b"sk_" + b"live_[A-Za-z0-9]{16,}",
             b"rk_" + b"live_[A-Za-z0-9]{16,}",
+            # Test-mode Stripe keys are still live credentials against the test API, and
+            # they are the ones people actually paste into a config file. Covering only
+            # the `live` prefixes left the commoner half of the class open.
+            b"sk_" + b"test_[A-Za-z0-9]{16,}",
+            b"rk_" + b"test_[A-Za-z0-9]{16,}",
             b"ghp_" + b"[A-Za-z0-9]{20,}",
             b"gho_" + b"[A-Za-z0-9]{20,}",
             b"ghs_" + b"[A-Za-z0-9]{20,}",
@@ -92,6 +97,19 @@ SECRET_CONTENT_RE = re.compile(
             b"glpat-" + b"[A-Za-z0-9_-]{16,}",
             b"-----BEGIN " + b"[A-Z ]*PRIVATE KEY-----",
             b"PuTTY-" + b"User-Key-File",
+            # Azure storage / Service Bus connection strings. The credential sits inside
+            # a semicolon-separated blob in an innocently named file (storage.conf,
+            # local.settings.json) with no vendor prefix on the value itself. The
+            # `Account`+`Key=` and `SharedAccess`+`Key=` spellings are canonical and
+            # base64, so an unpadded-or-padded base64 run is a zero-false-positive tell.
+            b"Account" + b"Key=[A-Za-z0-9+/]{32,}={0,2}",
+            b"SharedAccess" + b"Key=[A-Za-z0-9+/]{24,}={0,2}",
+            # A three-part JWT. This one MUST live here rather than in the assignment
+            # heuristic: `header.payload.signature` fullmatches _CODE_VALUE_RE's dotted
+            # path, so the classifier actively DISMISSED every bare JWT as source code.
+            # Both the header and the payload are base64 of JSON starting `{"`, hence the
+            # two `eyJ` anchors — that is what keeps this off ordinary dotted identifiers.
+            b"eyJ" + rb"[A-Za-z0-9_=-]{10,}\.eyJ[A-Za-z0-9_=-]{10,}\.[A-Za-z0-9_=-]{10,}",
             # A URL carrying userinfo is a credential regardless of what it is assigned
             # to: DATABASE_URL, REDIS_URL, MONGO_URI, SENTRY_DSN all commonly hold one
             # and none of their key names contain "password" or "token".
@@ -123,12 +141,23 @@ SECRET_CONTENT_RE = re.compile(
 # That nested quantifier is catastrophic backtracking — on a long non-matching line the
 # match time is exponential, and it hung the entire test suite the first time it ran.
 # Any change here must keep tests/test_pack_secrets.py::test_secret_scan_is_linear green.
+#
+# The alternation is matched against the text immediately before the `:`/`=`, so a name
+# must END with one of these words. `secret` therefore did NOT cover `secret_key=` —
+# after "secret" comes "_", not a separator — which is why Django/Flask's SECRET_KEY,
+# `private_key`, `account_key` and friends each need their own spelling. Longest
+# spellings first, purely for readability; the engine backtracks either way.
+# `shared_access_key` needs no entry of its own: the bounded prefix eats "shared_".
 _SECRET_KEY = (
     rb"[a-z0-9_-]{0,24}"
-    rb"(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?token|auth[_-]?token"
-    rb"|private[_-]?token|client[_-]?secret|refresh[_-]?token|session[_-]?key"
+    rb"(?:pass(?:word|wd|phrase)?|connection[_-]?string|client[_-]?secret"
+    rb"|private[_-]?token|private[_-]?key|refresh[_-]?token|session[_-]?key"
+    rb"|access[_-]?token|auth[_-]?token|secret[_-]?key|account[_-]?key"
+    rb"|access[_-]?key|api[_-]?key|authorization|secret"
     # bare `token` / `apikey`, as in NPM_TOKEN=… or {"apiKey":"…"}
-    rb"|token|apikey)"
+    # `dsn` covers SENTRY_DSN and friends: a DSN carries its credential inline and its
+    # key name contains neither "password" nor "token", so nothing else saw it.
+    rb"|token|apikey|dsn)"
 )
 SECRET_ASSIGN_RE = re.compile(
     # AWS secret keys are unquoted base64-ish and long; no value group, always a hit.
@@ -140,6 +169,30 @@ SECRET_ASSIGN_RE = re.compile(
     rb"|(?P<key>" + _SECRET_KEY + rb")[\"']?\s*[:=][ \t]*(?P<val>[^\n\r]{4,})",
     re.I,
 )
+
+# YAML block scalars put the key on one line and the value on the NEXT, so the
+# single-line pattern above never saw the value at all: a credential key followed by a
+# bare pipe or angle-bracket marker read as an assignment of that one character, and was
+# dismissed as too short. (Written in words on purpose — spelled out, this comment
+# matches the pattern below and the packer withholds its own secret filter. That is the
+# invariant at the top of this file, and it has now caught this eleven times.)
+# Separate pattern rather than a third branch, because Python's `re` refuses to redefine
+# the `key`/`val` group names inside one expression.
+# Only the FIRST continuation line is captured: that is enough to decide, and reading
+# further would need indentation tracking this scanner has no business doing.
+SECRET_BLOCK_RE = re.compile(
+    rb"(?P<key>" + _SECRET_KEY + rb")[\"']?[ \t]*:[ \t]*"
+    rb"[|>][-+]?[0-9]?[-+]?[ \t]*\r?\n"
+    rb"(?P<val>[ \t]+[^\n\r]{4,})",
+    re.I,
+)
+
+# `Authorization: Bearer <token>` and `Basic <base64>` are assignments whose value
+# carries a scheme word in front of the credential. Left in place the space made the
+# classifier call the whole thing prose, so the credential was never examined.
+# Stripping the scheme keeps the placeholder and reference checks in play: `Bearer
+# $OPENROUTER_API_KEY` still reduces to a placeholder and is still packed.
+_AUTH_SCHEME_RE = re.compile(rb"^(?:Bearer|Basic|Token|JWT|ApiKey|Digest)[ \t]+", re.I)
 
 # A value that is a reference to a credential is not a credential. `process.env.X`,
 # `settings.API_KEY` and `getpass.getpass()` are the normal, correct way to handle
@@ -177,6 +230,14 @@ def _trim_value(v: bytes) -> bytes:
     containing an early comma slip below the length threshold.
     """
     v = v.strip()
+    if v[:1] == b"`":
+        # A backtick immediately after the separator CLOSES a Markdown code span, so the
+        # assignment inside the span had NO value and everything after it is prose about
+        # it — as in "`API_KEY=` is how the tests guarantee no key is resolvable".
+        # The strip loop downstream removes that backtick and then classified the
+        # sentence as a passphrase, withholding a whole test file from its own review.
+        # A literal credential never begins with a backtick in any config syntax.
+        return b""
     if v[:1] in (b'"', b"'"):
         q = v[:1]
         # Escape-aware: a backslash-escaped quote inside the literal is not its end.
@@ -235,6 +296,12 @@ def _value_is_credential_like(v: bytes, key: bytes = b"") -> bool:
         v = v.strip().strip(b"\"'`").rstrip(b",;.").strip()
         if v == before:
             break
+    # `Authorization: Bearer <token>` — drop the scheme word so what gets classified is
+    # the credential, not "a value containing a space". Done AFTER unquoting so the
+    # header form and the quoted form both reduce to the same scalar.
+    scheme = _AUTH_SCHEME_RE.match(v)
+    if scheme:
+        v = v[scheme.end():].strip().strip(b"\"'`").rstrip(b",;.").strip()
     if _CODE_VALUE_RE.match(v):
         return False
     if len(v) < 8:
@@ -331,6 +398,10 @@ def looks_secret_content(data: bytes) -> bool:
             return True          # the AWS branch has no value group; it is always a hit
         if _value_is_credential_like(val, m.groupdict().get("key") or b""):
             return True
+    # Same classification, for the value that lives on the line AFTER the key.
+    for m in SECRET_BLOCK_RE.finditer(data):
+        if _value_is_credential_like(m.group("val"), m.group("key")):
+            return True
     return False
 
 BINARY_EXT = {
@@ -423,8 +494,10 @@ def load_gitignore(root: Path) -> List[str]:
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("!"):
             continue
-        # Root-anchored patterns in gitignore start with /
-        patterns.append(line.rstrip("/"))
+        # Root-anchored patterns in gitignore start with /. The TRAILING slash is kept:
+        # it is the only thing distinguishing "directory only" from "anything with this
+        # name", and `ignored()` needs it — see the note there.
+        patterns.append(line)
     return patterns
 
 
@@ -433,27 +506,39 @@ def ignored(rel: str, patterns: List[str]) -> bool:
     import fnmatch
 
     base = os.path.basename(rel)
+    segments = rel.split("/")
     for pat in patterns:
+        # A trailing slash means DIRECTORY ONLY: git does not ignore a file of that name.
+        # Discarding the slash made `multi_*/` also swallow `scripts/multi_review.sh` —
+        # a tracked source file that then silently never reached any review. Withholding
+        # a real file is exactly the "not reviewed" hole this module exists to prevent,
+        # and it stayed invisible until gitignore skips started being recorded.
+        dir_only = pat.endswith("/")
+        pat = pat.rstrip("/")
         root_only = pat.startswith("/")
         pat = pat.lstrip("/")
         if not pat:
             continue
         # Directory-style patterns: match path segment or full path prefix
         if "/" in pat or root_only:
-            if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, pat + "/*"):
+            if not dir_only and fnmatch.fnmatch(rel, pat):
+                return True
+            if fnmatch.fnmatch(rel, pat + "/*"):
                 return True
             prefix = pat.rstrip("*").rstrip("/")
-            if prefix and (rel == prefix or rel.startswith(prefix + "/")):
+            if prefix and (rel.startswith(prefix + "/") or (rel == prefix and not dir_only)):
                 return True
-            if root_only and not ("/" in pat):
+            if root_only and not ("/" in pat) and not dir_only:
                 # `/private.txt` → only root file private.txt
                 if fnmatch.fnmatch(base, pat) and "/" not in rel:
                     return True
         else:
             # basename-only patterns must not substring-match (cabin vs bin)
-            if fnmatch.fnmatch(base, pat):
+            if not dir_only and fnmatch.fnmatch(base, pat):
                 return True
-            for part in rel.split("/"):
+            # For a directory-only pattern the last segment is the FILE, so it is
+            # excluded: only an ancestor directory can carry the match.
+            for part in (segments[:-1] if dir_only else segments):
                 if fnmatch.fnmatch(part, pat):
                     return True
     return False
@@ -530,13 +615,42 @@ def rank_file(path: Path, rel: str) -> int:
     return score
 
 
+# Gitignored files are never packed, and that is correct — but it used to happen
+# BEFORE the content scan and without a record, so a gitignored `local.json` holding a
+# token was neither sent (good) nor reported (bad): the user could not tell "withheld"
+# from "clean". These bound the extra work, because a gitignored tree can be a build
+# directory with a hundred thousand files in it.
+IGNORED_SCAN_MAX_BYTES = 256_000     # don't read a gitignored artefact bigger than this
+IGNORED_SCAN_MAX_FILES = 2000        # ...and stop scanning content after this many
+IGNORED_LIST_CAP = 500               # ...and stop growing the manifest after this many
+
+
+def _ignored_holds_credential(full: Path) -> bool:
+    """Content-scan a gitignored file, cheaply and without ever retaining its bytes."""
+    if is_binary_path(full) or full.is_symlink():
+        return False
+    try:
+        if full.stat().st_size > IGNORED_SCAN_MAX_BYTES:
+            return False
+        raw = full.read_bytes()
+    except OSError:
+        return False
+    if looks_binary(raw):
+        return False
+    return looks_secret_content(raw)
+
+
 def iter_files(
     root: Path,
     patterns: List[str],
     secret_sink: Optional[List[str]] = None,
     pruned_sink: Optional[List[str]] = None,
     symlink_sink: Optional[List[str]] = None,
+    ignored_sink: Optional[List[str]] = None,
+    ignored_secret_sink: Optional[List[str]] = None,
+    ignored_count: Optional[List[int]] = None,
 ) -> Iterable[Tuple[int, Path, str]]:
+    scanned_ignored = 0
     for dirpath, dirnames, filenames in os.walk(root):
         # prune dirs in-place
         kept = []
@@ -578,6 +692,18 @@ def iter_files(
                     secret_sink.append(rel)
                 continue
             if ignored(rel, patterns):
+                # Still withheld — but no longer invisible. See IGNORED_SCAN_MAX_BYTES.
+                if ignored_count is not None:
+                    ignored_count[0] += 1
+                if ignored_sink is not None and len(ignored_sink) < IGNORED_LIST_CAP:
+                    ignored_sink.append(rel)
+                if (
+                    ignored_secret_sink is not None
+                    and scanned_ignored < IGNORED_SCAN_MAX_FILES
+                ):
+                    scanned_ignored += 1
+                    if _ignored_holds_credential(full):
+                        ignored_secret_sink.append(rel)
                 continue
             if is_binary_path(full):
                 continue
@@ -645,8 +771,14 @@ def pack(
     secrets_by_name: List[str] = []
     pruned_dirs: List[str] = []
     symlinks: List[str] = []
+    ignored_files: List[str] = []
+    ignored_with_creds: List[str] = []
+    ignored_total = [0]
     ranked = sorted(
-        iter_files(root, patterns, secrets_by_name, pruned_dirs, symlinks),
+        iter_files(
+            root, patterns, secrets_by_name, pruned_dirs, symlinks,
+            ignored_files, ignored_with_creds, ignored_total,
+        ),
         key=lambda x: (-x[0], x[2]),
     )
     all_rels = [rel for _, _, rel in ranked]
@@ -741,6 +873,14 @@ def pack(
         # "no secrets in .ssh" from "never looked at .ssh".
         "pruned_dirs": sorted(pruned_dirs),
         "symlinks_skipped": sorted(symlinks),
+        # Gitignored files are correctly withheld, but a withheld file must still be
+        # visible. `ignored_files` is capped for sanity, so the count is reported too;
+        # `ignored_files_with_credentials` is the subset the content scan flagged, and
+        # is deliberately NOT folded into secrets_skipped_by_content — that list means
+        # "would have been packed but for its content", which is a different claim.
+        "ignored_files": sorted(ignored_files),
+        "ignored_files_count": ignored_total[0],
+        "ignored_files_with_credentials": sorted(ignored_with_creds),
         # The scope root itself sitting under a secret-looking directory is a caller
         # problem, not a per-file one — flag it instead of silently withholding
         # every file in an otherwise ordinary project.
@@ -790,9 +930,15 @@ def mirror(root: Path, dest: Path, max_file_bytes: int = 120_000) -> dict:
     symlinks: List[str] = []
     withheld_by_content: List[str] = []
     skipped_other: List[str] = []
+    ignored_files: List[str] = []
+    ignored_with_creds: List[str] = []
+    ignored_total = [0]
     copied = 0
 
-    for _score, full, rel in iter_files(root, patterns, secrets_by_name, pruned, symlinks):
+    for _score, full, rel in iter_files(
+        root, patterns, secrets_by_name, pruned, symlinks,
+        ignored_files, ignored_with_creds, ignored_total,
+    ):
         try:
             if full.stat().st_size > max_file_bytes * 4:
                 # Same "too large" rule pack() uses. Without it the mirror handed the
@@ -827,6 +973,9 @@ def mirror(root: Path, dest: Path, max_file_bytes: int = 120_000) -> dict:
         "secrets_skipped_by_content": sorted(withheld_by_content),
         "pruned_dirs": sorted(pruned),
         "symlinks_skipped": sorted(symlinks),
+        "ignored_files": sorted(ignored_files),
+        "ignored_files_count": ignored_total[0],
+        "ignored_files_with_credentials": sorted(ignored_with_creds),
     }
 
 

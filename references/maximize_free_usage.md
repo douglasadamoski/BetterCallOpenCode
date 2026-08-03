@@ -10,8 +10,9 @@
 This skill’s author machine tops up **$10 once** → 1000 free RPD. Credits remain for paid models only if you opt in.
 
 ```bash
-python3 scripts/or_client.py --preflight -m openrouter/openai/gpt-oss-20b:free
+python3 scripts/or_client.py --preflight --model openrouter/openai/gpt-oss-20b:free
 # key.free_rpd_bucket → 50 or 1000
+# NB: the flag is --model. or_client.py has no -m; that is opencode's spelling.
 ```
 
 ## Prefer 1 request per review
@@ -33,7 +34,9 @@ Default backend is **`or-api`**.
 4. **Model fit**
    - Full pack: Nemotron **Ultra** free (1M ctx) or Super
    - Many small hops: Nano / Gemma flash / free router
-5. **Multi-model** — `multi_review.sh --preset coding-panel` with `--sleep 3` (respect 20 RPM).
+5. **Multi-model** — `multi_review.sh --preset coding-panel`. The default path is already
+   parallel under a sliding-window 20 RPM limiter; `--sequential --sleep 3` is the legacy
+   fixed-sleep path and is slower for the same number of requests.
 6. **On 429** — stop; optionally try **one** other free model; never spin.
 
 ## Local skill cap
@@ -43,6 +46,13 @@ Default `--cap 200` (under 1000 RPD) so a runaway agent cannot burn the whole Op
 ```bash
 bash scripts/opencode_review.sh ... --cap 500
 ```
+
+The cap counts ledger rows marked `billed` for the current UTC day. It is **check-then-act
+per run**, so it is not atomic across runs launched at the same moment: two can both read
+`used < cap` before either appends a row. `panel_run.py` admits at most `cap - used` models
+up front, which closes the fan-out case — the one that actually multiplies. For a strict
+cap, run one review at a time. `opencode_usage.sh` prints every row for the day, billed or
+not, so its "Calls today" can exceed what the cap counted.
 
 ## Multi-model presets + free RPM pacing
 

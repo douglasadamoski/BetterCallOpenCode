@@ -28,10 +28,29 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: shellcheck
         run: |
-          echo "--- advisory: warning + style ---"
+          echo "--- advisory: style and info (never blocking) ---"
           shellcheck -S style -f gcc scripts/*.sh || true
-          echo "--- blocking: errors ---"
-          shellcheck -S error -f gcc scripts/*.sh
+          echo "--- blocking: warnings and errors ---"
+          # Raised from -S error. Warning-class findings in this repo are things like
+          # unquoted expansions and `cd` without a guard, in scripts that handle paths
+          # from the user's project — worth failing a build over, not worth an advisory
+          # nobody reads.
+          #
+          # SC2034 (variable assigned but never used) is the one exclusion, and it is
+          # structural rather than a concession: shellcheck analyses each file alone,
+          # so every variable this codebase sets for a *different* file to read trips
+          # it. scripts/_bcoc_common.sh already carries a file-level
+          # `# shellcheck disable=SC2034` for CLIENT_PY/PACK_PY/DEFAULT_*, and
+          # opencode_review.sh's BCOC_REPORT_SECRETS is the same shape (read back by
+          # tests/test_redaction.py). Excluding it keeps every OTHER warning blocking
+          # instead of keeping them all advisory.
+          #
+          # It is still printed by the advisory step above, so a genuinely dead
+          # variable stays visible in the log. Once opencode_review.sh grows its own
+          # inline `# shellcheck disable=SC2034 # read by tests/opencode_review` line,
+          # delete `--exclude=SC2034` here — the gate is clean without it apart from
+          # that single site.
+          shellcheck -S warning -f gcc --exclude=SC2034 scripts/*.sh
 
   pytest:
     name: pytest (py${{ matrix.python-version }})
@@ -48,7 +67,10 @@ jobs:
       - run: pip install --quiet pytest
       # No network in CI: the suite must be fully offline. A test that reached
       # OpenRouter would silently spend the maintainer's free daily requests.
-      - run: pytest -q tests/
+      # tests/conftest.py enforces that in-process by replacing urllib's urlopen;
+      # --strict-markers makes a typo in the `allow_network` opt-out an error rather
+      # than a marker that quietly does nothing.
+      - run: pytest -q --strict-markers tests/
 
   syntax:
     name: syntax

@@ -94,18 +94,27 @@ Paid variants:
 
 - Do **not** use the free 50/1000 RPD table.
 - Draw from account credits (`GET /api/v1/credits`).
-- Report should show `Billed: paid` / cost when available.
+- The report header shows `Free model: false` and, when OpenRouter returns it,
+  `cost=<amount>` on the Tokens line. The ledger row carries `"free": false` and the same
+  cost figure. There is no separate "paid" word — `Billed:` means *the model was invoked*,
+  not *money changed hands*.
 
 Never pick paid models silently.
 
 ## Errors to stop on
+
+The mapping is in `or_client.classify_http`.
 
 | HTTP / skill RESULT | Meaning | Action |
 |---------------------|---------|--------|
 | 401/403 → AUTH | Bad key | Fix OpenRouter key / `opencode providers login` |
 | 402 → QUOTA | Credits / key limit | Top up or raise key limit |
 | 429 → QUOTA | Free RPD/RPM or provider | **STOP**, wait; optional one model rotate |
-| TIMEOUT | Upstream / local | Smaller pack, stages, or retry once |
+| 404/405 → **ERROR** | The API answered and rejected the **model id** — mistyped or retired | Check the id against `list_free_models.py`. This is *not* a network fault |
+| 502/503/504 → **UNREACHABLE** | Reached OpenRouter; the upstream provider is down | Retry **once**, then try another free model |
+| DNS/TCP/TLS failure → UNREACHABLE | The request never left the machine | Check connectivity; not billed |
+| other 4xx / 5xx → ERROR | Rejected or unusable response | Read the error body in the report |
+| TIMEOUT | Upstream / local | Smaller pack, stages, or retry once. **Counted as billed** — the request ran, the answer was lost |
 | TRUNCATED | `finish_reason=length` — hit `max_tokens` | Raise `--max-tokens` (default **16384**); reasoning models burn budget on thinking |
 | PAID_BLOCKED | Non-free without consent | Switch to `:free` or get user OK |
 

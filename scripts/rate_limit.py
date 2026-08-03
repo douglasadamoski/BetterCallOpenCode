@@ -18,13 +18,26 @@ import argparse
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
+from typing import Callable, Deque, Optional
 
 
 class SlidingWindowLimiter:
-    """Thread-safe: at most `max_calls` acquires inside any rolling `period_s` window."""
+    """Thread-safe: at most `max_calls` acquires inside any rolling `period_s` window.
 
-    def __init__(self, max_calls: int = 20, period_s: float = 60.0, name: str = "rpm"):
+    `time_fn`/`sleep_fn` exist so the limiter can be tested. The whole point of this
+    class is what happens at the 21st call in a 60-second window; verifying that with
+    the real clock costs a minute per assertion, so the suite injects a virtual clock
+    instead. Both default to the real thing and the default behaviour is unchanged.
+    """
+
+    def __init__(
+        self,
+        max_calls: int = 20,
+        period_s: float = 60.0,
+        name: str = "rpm",
+        time_fn: Optional[Callable[[], float]] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ):
         if max_calls < 1:
             raise ValueError("max_calls must be >= 1")
         if period_s <= 0:
@@ -32,9 +45,10 @@ class SlidingWindowLimiter:
         self.max_calls = int(max_calls)
         self.period_s = float(period_s)
         self.name = name
+        self._time = time_fn if time_fn is not None else time.monotonic
+        self._sleep = sleep_fn if sleep_fn is not None else time.sleep
         self._times: Deque[float] = deque()
         self._lock = threading.Lock()
-        self._cond = threading.Condition(self._lock)
         self.total_acquired = 0
         self.total_wait_s = 0.0
 
@@ -45,13 +59,13 @@ class SlidingWindowLimiter:
 
     def slots_free(self) -> int:
         with self._lock:
-            self._prune(time.monotonic())
+            self._prune(self._time())
             return max(0, self.max_calls - len(self._times))
 
     def wait_seconds(self) -> float:
         """How long until at least one slot frees (0 if free now)."""
         with self._lock:
-            now = time.monotonic()
+            now = self._time()
             self._prune(now)
             if len(self._times) < self.max_calls:
                 return 0.0
@@ -63,11 +77,11 @@ class SlidingWindowLimiter:
         Reserve one request slot. Blocks until a slot is available if block=True.
         Returns False only when non-blocking and no slot, or timeout exceeded.
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = None if timeout is None else self._time() + timeout
         waited = 0.0
-        with self._cond:
-            while True:
-                now = time.monotonic()
+        while True:
+            with self._lock:
+                now = self._time()
                 self._prune(now)
                 if len(self._times) < self.max_calls:
                     self._times.append(now)
@@ -78,22 +92,24 @@ class SlidingWindowLimiter:
                     return False
                 # Sleep until the oldest call ages out of the window.
                 sleep_for = self._times[0] + self.period_s - now
-                if deadline is not None:
-                    remaining = deadline - now
-                    if remaining <= 0:
-                        return False
-                    sleep_for = min(sleep_for, remaining)
-                if sleep_for > 0:
-                    t0 = time.monotonic()
-                    self._cond.wait(timeout=sleep_for + 0.01)
-                    waited += time.monotonic() - t0
-                else:
-                    # Spurious / clock: brief yield
-                    self._cond.wait(timeout=0.01)
+            # The lock is released across the sleep: a waiter must not block
+            # slots_free()/snapshot() or another thread's acquire for a whole window.
+            # Nothing ever signals this limiter, so a plain sleep is exactly what the
+            # previous Condition.wait(timeout=…) did — minus the untestable clock.
+            if deadline is not None:
+                remaining = deadline - now
+                if remaining <= 0:
+                    return False
+                sleep_for = min(sleep_for, remaining)
+            if sleep_for <= 0:
+                sleep_for = 0.0  # spurious / clock skew: brief yield below
+            t0 = self._time()
+            self._sleep(sleep_for + 0.01)
+            waited += self._time() - t0
 
     def snapshot(self) -> dict:
         with self._lock:
-            now = time.monotonic()
+            now = self._time()
             self._prune(now)
             return {
                 "name": self.name,
@@ -106,8 +122,16 @@ class SlidingWindowLimiter:
             }
 
 
-def free_rpm_limiter(rpm: Optional[int] = None) -> SlidingWindowLimiter:
-    """Default free-model RPM limiter (OpenRouter :free = 20/min)."""
+def free_rpm_limiter(
+    rpm: Optional[int] = None,
+    time_fn: Optional[Callable[[], float]] = None,
+    sleep_fn: Optional[Callable[[float], None]] = None,
+) -> SlidingWindowLimiter:
+    """Default free-model RPM limiter (OpenRouter :free = 20/min).
+
+    A garbage BCOPENCODE_FREE_RPM must fall back to 20 rather than crash the panel:
+    the env var is user-typed and the cost of guessing wrong is only a slower run.
+    """
     import os
 
     n = rpm
@@ -115,9 +139,12 @@ def free_rpm_limiter(rpm: Optional[int] = None) -> SlidingWindowLimiter:
         raw = os.environ.get("BCOPENCODE_FREE_RPM", "20").strip()
         try:
             n = int(raw)
-        except ValueError:
+        except (TypeError, ValueError):
             n = 20
-    return SlidingWindowLimiter(max_calls=max(1, n), period_s=60.0, name="free_rpm")
+    return SlidingWindowLimiter(
+        max_calls=max(1, n), period_s=60.0, name="free_rpm",
+        time_fn=time_fn, sleep_fn=sleep_fn,
+    )
 
 
 def main() -> int:
