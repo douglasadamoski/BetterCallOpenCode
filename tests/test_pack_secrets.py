@@ -532,12 +532,17 @@ def test_envrc_is_secret_by_name():
 # --- Regressions from the BetterCallChatGPT review round 6 -----------------------
 
 
+# Assembled at runtime: written literally, these URLs match the packer's own userinfo
+# detector and this file withholds itself. Same invariant as pack_context.py.
+_AT = "@"
+
+
 @pytest.mark.parametrize(
     "line",
     [
-        "DATABASE_URL=postgres://user:pass@host/db",
-        "REDIS_URL=redis://:pass@host",           # userinfo with no username
-        "MONGO_URI=mongodb://user:pass@host/db",
+        "DATABASE_URL=postgres://user:pass" + _AT + "host/db",
+        "REDIS_URL=redis://:pass" + _AT + "host",       # userinfo with no username
+        "MONGO_URI=mongodb://user:pass" + _AT + "host/db",
     ],
 )
 def test_credentialed_urls_are_caught_regardless_of_key_name(tmp_path, line):
