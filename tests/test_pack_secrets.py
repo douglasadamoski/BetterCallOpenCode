@@ -529,6 +529,42 @@ def test_envrc_is_secret_by_name():
     assert pack_context.is_secret(Path(".direnv/x"), ".direnv/x")
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".env",
+        ".envrc",
+        ".env.production",
+        ".env-production",   # hyphen: missed until the BetterCallMyAI port caught it
+        ".env_local",        # underscore: same gap
+        ".environment",
+        "sub/.env",          # nested: needs the `(^|/|\\.)` prefix, not a bare `^`
+        "deploy/.env-staging",
+        "prod.env",          # dot-prefixed: the form the very first filter missed
+        "env.production",
+        "env.sh",
+    ],
+)
+def test_env_family_is_secret_by_name(name):
+    """Every conventional env-file spelling, in one table.
+
+    This exists because two sibling filters had COMPLEMENTARY gaps. Porting this file
+    into BetterCallMyAI failed its `.env-production` test: the pattern here allowed only
+    a dot after `env`, while the older one there used a bare `^\\.env.*` that missed
+    `sub/.env` and `prod.env`. Each filter's tests passed; neither covered the union.
+    """
+    assert pack_context.is_secret(Path(name), name), f"would have been packed: {name}"
+
+
+@pytest.mark.parametrize(
+    "name", ["environment.yml", "environments.py", "envelope.go", "env_utils.py"]
+)
+def test_env_lookalikes_are_not_withheld(name):
+    """The other half of the pattern's job. `environment.yml` is a conda file and prime
+    review context; withholding it to be safe would quietly degrade every review."""
+    assert not pack_context.is_secret(Path(name), name), f"needlessly withheld: {name}"
+
+
 # --- Regressions from the BetterCallChatGPT review round 6 -----------------------
 
 

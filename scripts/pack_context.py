@@ -52,7 +52,19 @@ OWN_OUTPUT_RE = re.compile(
 SECRET_NAME_RE = re.compile(
     # NB `\.env` must NOT require a leading dot: `prod.env` and `env.production` are
     # extremely common real filenames and both walked straight through the first version.
-    r"((^|/|\.)env($|\..*$)|(^|/)env\..*$|(^|/)\.envrc$|(^|/)\.direnv(/|$)|"
+    #
+    # The separator class is `[-._]`, not just `.`. Porting this filter into BetterCallMyAI
+    # regressed one of its tests: it had caught `.env-production` with a plain `^\.env.*`
+    # and this pattern did not, because it only allowed a DOT after `env`. `.env-production`
+    # and `.env_local` are both ordinary conventions. The two filters had complementary
+    # gaps — the old one missed `sub/.env` and `prod.env` for want of the `(^|/|\.)` prefix,
+    # this one missed the hyphen and underscore forms. Both alternatives are kept.
+    #
+    # The second branch is a deliberate catch-all for dotfiles: anything named `.env*` is
+    # withheld whatever follows, which is how `.environment` is covered without letting
+    # `environment.yml` (a conda file, legitimate context) match.
+    r"((^|/|\.)env($|[-._][^/]*$)|(^|/)\.env[^/]*$|"
+    r"(^|/)env\..*$|(^|/)\.envrc$|(^|/)\.direnv(/|$)|"
     r"(^|/)creds?(\.|$)|(^|/)credentials(\.|$)|"
     r"\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|\.ppk$|\.keystore$|"
     r"(^|/)id_rsa|(^|/)id_ed25519|(^|/)id_ecdsa|(^|/)id_dsa|"
