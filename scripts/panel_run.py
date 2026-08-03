@@ -307,8 +307,11 @@ def run_one(
             return row
 
     elapsed = time.monotonic() - t0
-    # Prefer RESULT= from stdout (wrapper prints it last)
-    result = "?"
+    # Prefer RESULT= from stdout (wrapper prints it last). Default to ERROR, never "?":
+    # a launch failure or a child that died before printing anything used to propagate
+    # `RESULT=?` all the way to the panel's own last stdout line — an undocumented word,
+    # which is a contract violation exactly where the caller most needs a real answer.
+    result = "ERROR"
     for line in reversed((stdout + "\n" + stderr).splitlines()):
         if line.startswith("RESULT="):
             result = line.split("=", 1)[1].strip()

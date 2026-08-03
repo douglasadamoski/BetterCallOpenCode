@@ -99,13 +99,13 @@ def main() -> int:
         if truncated:
             text += f"\n\n… [truncated at {args.max_file_bytes} bytes]\n"
         f = pack_context.fence_for(text)
-        block = f"## File: {rel}\n{f}text\n{text}\n{f}\n\n"
+        block = f"## File: {pack_context.safe_path(rel)}\n{f}text\n{text}\n{f}\n\n"
         t = approx_tokens(block)
         if t > budget:
             keep = budget * 4
             text = text[:keep] + "\n\n… [truncated for chunk budget]\n"
             f = pack_context.fence_for(text)
-            block = f"## File: {rel}\n{f}text\n{text}\n{f}\n\n"
+            block = f"## File: {pack_context.safe_path(rel)}\n{f}text\n{text}\n{f}\n\n"
             t = approx_tokens(block)
         if cur and cur_tok + t > budget:
             flush()

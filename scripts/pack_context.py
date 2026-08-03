@@ -142,43 +142,63 @@ SECRET_ASSIGN_RE = re.compile(
 # secrets — withholding those files creates large "not reviewed" holes in exactly the
 # security-relevant code a reviewer most needs to see.
 _CODE_REF_RE = re.compile(rb"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$")
-_CALLABLE_RE = re.compile(rb"[(){}\[\]]")
+# A call or a subscript means this is code, not a literal: `getpass.getpass()`,
+# `os.environ['TOKEN']`. A LONE brace does not — a password may legitimately contain one.
+_CALLABLE_RE = re.compile(rb"\([^)]*\)|\[[^\]]*\]")
+
+
+def _trim_value(v: bytes) -> bytes:
+    """Trim a captured right-hand side down to the scalar it assigns.
+
+    The regex captures to end-of-line, so the raw capture carries JSON punctuation and
+    trailing comments. Trimming must never SHRINK a real secret, though, so it only
+    ever removes a quoted wrapper, a trailing comment, or trailing punctuation — it
+    does NOT truncate at the first structural character it sees. Doing that let a value
+    containing an early comma slip below the length threshold.
+    """
+    v = v.strip()
+    if v[:1] in (b'"', b"'"):
+        q = v[:1]
+        # Escape-aware: a backslash-escaped quote inside the literal is not its end.
+        i = 1
+        while i < len(v):
+            if v[i : i + 1] == b"\\":
+                i += 2
+                continue
+            if v[i : i + 1] == q:
+                return v[1:i]
+            i += 1
+        return v[1:]
+    for marker in (b" #", b"\t#", b" //"):
+        idx = v.find(marker)
+        if idx > 0:
+            v = v[:idx]
+    return v.strip()
 
 
 def _value_is_credential_like(v: bytes) -> bool:
     """Does this right-hand side look like a literal secret, rather than a reference?"""
-    v = v.strip()
-    # Trim the right-hand side BY SYNTAX before classifying. The regex captures to
-    # end-of-line, so the raw capture picks up JSON punctuation (`{"apiKey":"X"}` ->
-    # `"X"}`) and trailing comments (`api_key = "X" # prod`). Both defeated the
-    # classifier: the first via the bracket check, the second via the space check.
-    if v[:1] in (b'"', b"'"):
-        q = v[:1]
-        end = v.find(q, 1)
-        if end > 0:
-            v = v[1:end]            # exactly the quoted literal, nothing after it
-    else:
-        # unquoted: stop at a comment marker or a structural delimiter
-        for marker in (b" #", b"\t#", b" //", b",", b"}", b"]", b")"):
-            idx = v.find(marker)
-            if idx > 0:
-                v = v[:idx]
-    # Backticks are stripped because prose quotes code in markdown spans: without this,
-    # a comment reading `accessToken = request.headers.authorization`. classified as a
-    # live credential — which is how this file came to withhold itself a fourth time.
-    v = v.strip(b"\"'`").strip().rstrip(b",;.").strip().strip(b"\"'`")
+    v = _trim_value(v)
+    # Backticks are stripped because prose quotes code in markdown spans, and trailing
+    # sentence/structure punctuation is not part of the value.
+    # Strip wrapping quotes/backticks and trailing sentence punctuation until stable.
+    # Both must go before the code checks (a value quoted in prose arrives as
+    # `something",`), but a closing bracket must NOT — the callable/subscript checks
+    # need it to recognise `os.environ['TOKEN']` and `getpass.getpass()` as code.
+    for _ in range(4):
+        before = v
+        v = v.strip().strip(b"\"'`").rstrip(b",;.").strip()
+        if v == before:
+            break
+    if _CODE_REF_RE.match(v) or _CALLABLE_RE.search(v):
+        return False
     if len(v) < 8:
         return False
     if PLACEHOLDER_RE.search(v):
         return False
-    if _CODE_REF_RE.match(v) or _CALLABLE_RE.search(v):
-        return False
     if b" " in v or b"\t" in v:
         return False          # prose, not a token
-    try:
-        txt = v.decode("utf-8", errors="replace")
-    except Exception:
-        return False
+    txt = v.decode("utf-8", errors="replace")
     classes = sum(
         (
             any(c.islower() for c in txt),
@@ -187,8 +207,8 @@ def _value_is_credential_like(v: bytes) -> bool:
             any(not c.isalnum() for c in txt),
         )
     )
-    # Two character classes over 12 chars, or three over 8 — enough to separate
-    # `Tr0ub4dor&3xK` and `abcdefghijklmnop!` from `see-vault` and `TODO`.
+    # Two character classes over 12 chars, or three over 8 — enough to separate a real
+    # passphrase from a short word like a vault reference or a TODO marker.
     return (classes >= 2 and len(v) >= 12) or (classes >= 3 and len(v) >= 8)
 
 
@@ -198,7 +218,10 @@ def _value_is_credential_like(v: bytes) -> bool:
 PLACEHOLDER_RE = re.compile(
     rb"\.\.\."
     rb"|\xe2\x80\xa6"  # UTF-8 ellipsis
-    rb"|[<>{}$]"  # <your-key>, ${VAR}, {{TOKEN}}
+    rb"|<[^>]{0,40}>"           # <your-key>
+    rb"|\$\{[^}]{0,40}\}"        # ${VAULT_SECRET}
+    rb"|\{\{[^}]{0,40}\}\}"      # {{TOKEN}}
+    rb"|\$[A-Z][A-Z0-9_]{2,}"    # $SOME_VAR
     rb"|\*{3,}|x{4,}|X{4,}"
     rb"|example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder|redacted"
     rb"|dummy|fake|sample|todo|insert|replace|hunter2|s3cret|secret[_-]?here",

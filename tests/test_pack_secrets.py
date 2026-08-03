@@ -453,3 +453,27 @@ def test_safe_path_neutralises_structure_characters():
     assert "`" not in out
     assert "\n" not in out and "\t" not in out
     assert "<U+000A>" in out and "<U+0009>" in out
+
+
+# --- Regressions from the BetterCallChatGPT review round 4 -----------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "pass" + 'word = "A1!\\"bcdefghijklmnop"',   # escaped quote inside the literal
+        "pass" + "word = A1!,bcdefghijklmnop",        # comma early in an unquoted value
+        "pass" + "word = A1!}bcdefghijklmnop",        # brace early in an unquoted value
+    ],
+)
+def test_trimming_cannot_create_a_false_negative(tmp_path, content):
+    """Trimming is necessary but must never SHRINK a real secret below threshold.
+
+    The RHS is captured to end-of-line, so JSON punctuation and comments come along —
+    but stopping at the first `,` or at an escaped quote let real values slip through.
+    Both the trimmed scalar and the raw single-token RHS are classified, so a trim can
+    only ever add a way to say yes.
+    """
+    (tmp_path / "app.conf").write_text(content + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {content}"
