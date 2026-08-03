@@ -429,8 +429,6 @@ fi
 # Write/shell restriction is enforced by three layers (see the block before the run
 # below, and references/opencode_notes.md for the live experiments that established
 # them). Each is verified before the run rather than assumed.
-command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
-
 # --- scope scan: refuse a repo that can execute code inside opencode ---------------
 # A repo containing .opencode/plugin/*.js gets that module IMPORTED AND EXECUTED by
 # opencode before any agent, permission or model exists. Verified on 1.18.11 against a
@@ -465,6 +463,8 @@ if [[ -n "$_oc_plugins" ]]; then
   echo "RESULT=REFUSED"
   exit 0
 fi
+
+command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
 
 AGENT_NAME="${BCOPENCODE_AGENT:-bcoc-review}"
 export OPENCODE_CONFIG_DIR="${BCOPENCODE_OPENCODE_CONFIG_DIR:-$SKILL_DIR/opencode-config}"
