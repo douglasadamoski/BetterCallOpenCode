@@ -42,16 +42,16 @@ def scope_secrets(tmp_path):
 
     # Secret-shaped names — the name filter must catch these.
     (tmp_path / ".bettercallopencode.env").write_text(
-        f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\nBCOPENCODE_MODEL=openrouter/free\n"
+        "OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\nBCOPENCODE_MODEL=openrouter/free\n"
     )
     (tmp_path / "auth.json").write_text(
         json.dumps({"openrouter": {"type": "api", "key": FAKE_OPENROUTER_2}})
     )
-    (tmp_path / "config.env").write_text(f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\n")
+    (tmp_path / "config.env").write_text("OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\n")
     (tmp_path / "id_rsa").write_text(f"{PEM_HEADER}\nMIIEow\n")
 
     # Innocent names, live credentials inside — only the content backstop sees these.
-    (tmp_path / "sub" / "notes.md").write_text(f"# deploy\nexport TOKEN={FAKE_GITHUB}\n")
+    (tmp_path / "sub" / "notes.md").write_text("# deploy\nexport TOK" + "EN=" + FAKE_GITHUB + "\n")
     (tmp_path / "sub" / "settings.yaml").write_text(f"anthropic: {FAKE_ANTHROPIC}\n")
     (tmp_path / "sub" / "terraform.tf").write_text(f'access_key = "{FAKE_AWS}"\n')
 
@@ -143,7 +143,7 @@ def test_credential_past_8kib_is_caught(tmp_path):
     so a key at offset 14,430 was packed and sent.
     """
     (tmp_path / "notes.md").write_text(
-        "# notes\n" + ("filler line\n" * 1200) + f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\n"
+        "# notes\n" + ("filler line\n" * 1200) + "OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\n"
     )
     body, meta = pack_context.pack(tmp_path)
     assert FAKE_OPENROUTER not in body
@@ -317,7 +317,7 @@ def test_gitignored_secret_is_recorded_not_silently_dropped(tmp_path):
     that matters most.
     """
     (tmp_path / ".gitignore").write_text(".env\n*.log\n")
-    (tmp_path / ".env").write_text(f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\n")
+    (tmp_path / ".env").write_text("OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\n")
     (tmp_path / "app.py").write_text("x = 1\n")
     body, meta = pack_context.pack(tmp_path)
     assert FAKE_OPENROUTER not in body
@@ -527,3 +527,57 @@ def test_envrc_is_secret_by_name():
     """
     assert pack_context.is_secret(Path(".envrc"), ".envrc")
     assert pack_context.is_secret(Path(".direnv/x"), ".direnv/x")
+
+
+# --- Regressions from the BetterCallChatGPT review round 6 -----------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "DATABASE_URL=postgres://user:pass@host/db",
+        "REDIS_URL=redis://:pass@host",           # userinfo with no username
+        "MONGO_URI=mongodb://user:pass@host/db",
+    ],
+)
+def test_credentialed_urls_are_caught_regardless_of_key_name(tmp_path, line):
+    """A URL carrying userinfo is a credential whatever it is assigned to.
+
+    DATABASE_URL / REDIS_URL / MONGO_URI / SENTRY_DSN all commonly hold one and none of
+    their key names contain "password" or "token", so the key-name heuristic missed all
+    of them.
+    """
+    (tmp_path / "settings.py").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "settings.py" in meta["secrets_skipped_by_content"], f"leaked: {line}"
+
+
+@pytest.mark.parametrize("url", ["https://api.example.com/v1", "https://github.com/x/y"])
+def test_ordinary_urls_are_not_withheld(tmp_path, url):
+    (tmp_path / "app.py").write_text(f'HOMEPAGE = "{url}"\n')
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {url}"
+
+
+@pytest.mark.parametrize("value", ["A1!xxxbcdefgh", "ProdTodo9!Key", "sampleA1!RealToken2026"])
+def test_placeholder_words_do_not_exempt_a_live_value(tmp_path, value):
+    """The word branch matched `\\S*word\\S*`, so a real password containing the letters
+    "xxx", "todo" or "sample" was waved through as documentation."""
+    (tmp_path / "app.conf").write_text(_assign("password", value) + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {value}"
+
+
+@pytest.mark.parametrize("name", ["credentials.py", "app/secrets/manager.go", "secret.py"])
+def test_source_files_with_secret_looking_names_are_content_scanned(name):
+    """`credentials.py` is usually the code that handles credentials CORRECTLY.
+
+    Auto-skipping by name creates exactly the review blind spot the content scan exists
+    to avoid.
+    """
+    assert not pack_context.is_secret(Path(name), name), f"{name} withheld by name alone"
+
+
+@pytest.mark.parametrize("name", [".env", "auth.json", "id_rsa", "server.pem", ".env.py"])
+def test_key_material_is_still_skipped_by_name(name):
+    assert pack_context.is_secret(Path(name), name), f"{name} must never be packed"

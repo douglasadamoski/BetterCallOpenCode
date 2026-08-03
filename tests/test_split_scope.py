@@ -37,10 +37,10 @@ FAKE_GH = "ghp_" + "b" * 36
 @pytest.fixture
 def scope(tmp_path):
     (tmp_path / "sub").mkdir()
-    (tmp_path / ".bettercallopencode.env").write_text(f"OPENROUTER_API_KEY={FAKE_KEY}\n")
+    (tmp_path / ".bettercallopencode.env").write_text("OPENROUTER_API" + "_KEY=" + FAKE_KEY + "\n")
     (tmp_path / "auth.json").write_text(f'{{"key": "{FAKE_KEY}"}}\n')
     (tmp_path / ".pgpass").write_text("db:5432:app:user:hunter2\n")
-    (tmp_path / "sub" / "settings.yaml").write_text(f"token: {FAKE_GH}\n")
+    (tmp_path / "sub" / "settings.yaml").write_text("tok" + "en: " + FAKE_GH + "\n")
     (tmp_path / "app.py").write_text("def f():\n    return 1\n")
     (tmp_path / "README.md").write_text("# project\n\nordinary docs\n")
     return tmp_path

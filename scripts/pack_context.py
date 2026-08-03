@@ -92,6 +92,10 @@ SECRET_CONTENT_RE = re.compile(
             b"glpat-" + b"[A-Za-z0-9_-]{16,}",
             b"-----BEGIN " + b"[A-Z ]*PRIVATE KEY-----",
             b"PuTTY-" + b"User-Key-File",
+            # A URL carrying userinfo is a credential regardless of what it is assigned
+            # to: DATABASE_URL, REDIS_URL, MONGO_URI, SENTRY_DSN all commonly hold one
+            # and none of their key names contain "password" or "token".
+            rb"[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^/\s:@]{0,64}:[^/\s:@]{1,64}@",
         ]
     )
 )
@@ -206,7 +210,7 @@ def _value_is_credential_like(v: bytes) -> bool:
         return False
     if len(v) < 8:
         return False
-    if PLACEHOLDER_RE.search(v):
+    if _is_placeholder(v):
         return False
     if b" " in v or b"\t" in v:
         return False          # prose, not a token
@@ -230,6 +234,7 @@ def _value_is_credential_like(v: bytes) -> bool:
 # FULLMATCH, again. As a substring test, a live value that merely CONTAINED a
 # placeholder-shaped fragment — `A1!bcdef<ghij>klmnop`, `A1!bcdef${GHIJ}klmnop` — was
 # dismissed as illustrative and leaked. The WHOLE scalar has to be a placeholder.
+# Structural placeholders: the whole scalar IS the placeholder.
 PLACEHOLDER_RE = re.compile(
     rb"^(?:"
     rb"<[^>]*>"                       # <your-key>
@@ -239,12 +244,26 @@ PLACEHOLDER_RE = re.compile(
     rb"|[xX*]{4,}"                    # xxxxxxxx
     rb"|\.{3,}"                       # ...
     rb"|\S*\xe2\x80\xa6\S*"            # anything containing a UTF-8 ellipsis
-    rb"|\S*(?:example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder"
-    rb"|redacted|dummy|fake|sample|todo|insert|replace|hunter2|s3cret"
-    rb"|secret[_-]?here|xxx)\S*"       # a single token built around a placeholder word
     rb")$",
     re.I,
 )
+
+# Word-based placeholders (`example-token`, `changeme`, `dummy_key`) are far weaker
+# evidence, so they only apply to a value made ENTIRELY of identifier-ish characters.
+# As a plain fullmatch over `\S*`, a live password that happened to contain the letters
+# "xxx", "todo" or "sample" — `A1!xxxbcdefgh`, `ProdTodo9!Key` — was waved through.
+# Punctuation in the value means it is not a documentation stand-in.
+PLACEHOLDER_WORD_RE = re.compile(
+    rb"^[A-Za-z0-9_.-]*"
+    rb"(?:example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder|redacted"
+    rb"|dummy|fake|sample|todo|insert|replace|hunter2|s3cret|secret[_-]?here|xxx)"
+    rb"[A-Za-z0-9_.-]*$",
+    re.I,
+)
+
+
+def _is_placeholder(v: bytes) -> bool:
+    return PLACEHOLDER_RE.match(v) is not None or PLACEHOLDER_WORD_RE.match(v) is not None
 
 
 def looks_secret_content(data: bytes) -> bool:
@@ -409,7 +428,23 @@ SECRET_DIRS = {
 }
 
 
+# Source files whose NAME looks secret — credentials.py, secret.py, app/secrets/manager.go
+# — are usually the code that handles credentials CORRECTLY. Auto-skipping them by name
+# creates exactly the review blind spot the content scan exists to avoid, so for these
+# the content scan decides instead.
+SOURCE_EXT = {
+    ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb", ".rs", ".java",
+    ".kt", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".swift", ".scala", ".sh", ".bash",
+}
+
+
 def is_secret(path: Path, rel: str = "") -> bool:
+    # `.env.py` is still a secret name; only a *source extension* earns the exemption,
+    # and only when the name does not also look like key material.
+    if path.suffix.lower() in SOURCE_EXT and not re.search(
+        r"(^|/|\.)env($|\.)|\.pem$|\.key$|id_rsa|id_ed25519", (rel or path.name), re.I
+    ):
+        return False
     name = path.name
     rel_n = (rel or name).replace("\\", "/")
     if SECRET_NAME_RE.search(name) or SECRET_NAME_RE.search(rel_n):

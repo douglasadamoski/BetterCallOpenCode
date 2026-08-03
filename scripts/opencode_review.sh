@@ -157,6 +157,11 @@ fi
 
 bcoc_have_python || die "python3 is required"
 TIMEOUT_BIN="$(bcoc_resolve_timeout)" || die "neither 'timeout' nor 'gtimeout' found (macOS: brew install coreutils)"
+# Resolve the process-group launcher BEFORE the billed boundary. If setsid is missing
+# (it is not on stock macOS) the launch would fail after BCOC_BILLED=1 and record a
+# billed row for a model that was never invoked. Falling back to a plain background
+# job costs us group-signalling, which the trap degrades to gracefully.
+if command -v setsid >/dev/null 2>&1; then SETSID_BIN=(setsid); else SETSID_BIN=(); fi
 
 MODEL="$(bcoc_normalize_model "$MODEL")"
 
@@ -333,7 +338,7 @@ PY
 
   # From here the request is assumed spent, whatever happens next.
   BCOC_BILLED=1
-  setsid python3 "$CLIENT_PY" \
+  ${SETSID_BIN[@]+"${SETSID_BIN[@]}"} python3 "$CLIENT_PY" \
     --model "$MODEL" \
     --prompt-file "$FULL_PROMPT" \
     --max-tokens "$MAX_TOKENS" \
@@ -553,7 +558,7 @@ BCOC_BILLED=1
 # Argument order matters: BOTH `message` and `-f/--file` are yargs *arrays*, so
 # `-f FILE "msg"` swallows the message as a second filename and opencode dies with
 # "File not found: <your message>". Message first, -f last with nothing after it.
-setsid "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
+${SETSID_BIN[@]+"${SETSID_BIN[@]}"} "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
   "Read the attached file: it contains your full review instructions. Follow them and report your findings." \
   --dir "$PRIMARY" \
   --agent "$AGENT_NAME" \
