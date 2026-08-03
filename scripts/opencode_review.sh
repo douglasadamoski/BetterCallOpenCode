@@ -283,10 +283,11 @@ fi
 # The RESULT word is deliberately NOT changed: its vocabulary is a documented contract in
 # SKILL.md, and the closest existing word (ERROR) would tell Claude to retry and spend
 # again. The machine-readable signal is the `SECRET_SCAN=` line on stderr.
-# shellcheck disable=SC2034
-#   Read back by tests/test_redaction.py, which shellcheck cannot see — it analyses
-#   each file alone. Same cross-file false positive _bcoc_common.sh documents.
-BCOC_REPORT_SECRETS="none"
+# Consumed outside this file: tests/test_redaction.py reads it back after sourcing.
+# `export` is the honest way to say so — shellcheck's own SC2034 text suggests exactly
+# this ("or export if used externally"), and it beats a disable directive that has to be
+# repeated at every assignment in the case statement below.
+export BCOC_REPORT_SECRETS="none"
 
 bcoc_guard_report() {  # $1 = path to the finished report
   local f="$1" rc
