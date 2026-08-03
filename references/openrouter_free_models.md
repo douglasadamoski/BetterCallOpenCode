@@ -127,3 +127,20 @@ an OpenRouter outage — it was an undersized completion budget. Re-verified wit
 `--max-tokens 4096` → `RESULT=OK`, `finish_reason=stop`.
 
 **Never retry-loop** on QUOTA/CAP.
+
+## Per-model notes from live testing (2026-08-03)
+
+Measured across three full 15-model panels against this repo's own source, plus targeted
+probes. These are model/provider behaviours, not skill defects — recorded so a failure is
+recognised rather than re-diagnosed.
+
+| model | behaviour |
+|---|---|
+| `cohere/north-mini-code:free` | **Healthy on small prompts, unreliable on large ones.** 4/4 clean `finish=stop` in 6–10 s on a short prompt. On a ~46k-token packed prompt it variously stalled past 7 minutes, returned `finish_reason=error` with ~2k chars of partial output, or emitted 60k characters containing zero findings. Prefer it for staged/chunked reviews (Mode D), not whole-repo packs. |
+| `inclusionai/ling-3.0-flash:free` | Ignores `reasoning.max_tokens` entirely. With reasoning enabled it spends the whole completion budget thinking (14 480 of 16 000 tokens) and returns ~1 800 chars. Fine with the default `BCOPENCODE_REASONING_EFFORT=none`. |
+| `nvidia/nemotron-3-super-120b-a12b:free` | Same reasoning-burn pattern as ling at `effort=low`; fine at the `none` default. |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | The one model where reasoning clearly pays: 10 findings at `effort=low` vs 6 at `none`. Worth setting `BCOPENCODE_REASONING_EFFORT=low` for this model specifically. |
+| `google/gemma-4-*:free` | Frequently `429` from an upstream **shared pool** (`limit_source: upstream_provider_shared_pool`) — not your quota. Retry later or add your own provider key. |
+
+`finish_reason=error` now yields `RESULT=ERROR` rather than `OK`; before that fix a model
+aborting mid-generation was indistinguishable from a clean review.

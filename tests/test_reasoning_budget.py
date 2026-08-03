@@ -122,3 +122,66 @@ def test_effort_and_max_tokens_are_never_both_sent(monkeypatch, env):
 def test_garbage_legacy_value_falls_back_rather_than_crashing(monkeypatch):
     body = sent_body(monkeypatch, BCOPENCODE_REASONING_MAX_TOKENS="not-a-number")
     assert body.get("reasoning") == {"max_tokens": 2048}
+
+
+# --- finish_reason classification -------------------------------------------------
+
+
+def _classify(monkeypatch, finish, content, usage=None):
+    """Drive the real parse path with a synthetic provider response."""
+    oc = _fresh_client()
+    parsed = {
+        "choices": [{"finish_reason": finish, "message": {"content": content}}],
+        "usage": usage or {},
+        "model": "vendor/model:free",
+    }
+    monkeypatch.setattr(oc, "http_json", lambda *a, **k: (200, "", parsed))
+    return oc.chat("key", "vendor/model:free", [{"role": "user", "content": "x"}], 16000, 0.2, 10)
+
+
+@pytest.mark.parametrize("finish", ["error", "content_filter"])
+def test_provider_signalled_failure_is_never_reported_as_success(monkeypatch, finish):
+    """Only `length`/`max_tokens` used to be special-cased.
+
+    Every other finish_reason fell through to OK as long as ANY content existed — so a
+    response that explicitly said the generation failed was reported as a clean review,
+    and Claude would triage a failed generation as complete. Observed live:
+    cohere/north-mini-code returns finish_reason='error' with ~2k chars of partial
+    output on a large prompt, and the run reported RESULT=OK.
+    """
+    result, env = _classify(monkeypatch, finish, "some partial text")
+    assert result == "ERROR", f"finish_reason={finish!r} must not be OK"
+    assert finish in env.get("error", ""), "the message must name the actual cause"
+
+
+@pytest.mark.parametrize("finish", ["error", "content_filter"])
+def test_partial_output_is_preserved_not_discarded(monkeypatch, finish):
+    """The partial text is evidence. Losing it would make the failure harder to diagnose
+    than it needs to be — the report should show what little came back."""
+    _result, env = _classify(monkeypatch, finish, "half a finding")
+    assert "half a finding" in (env.get("content") or "")
+
+
+def test_error_result_still_counts_as_billed():
+    """These stay ERROR rather than becoming REFUSED on purpose.
+
+    In this skill REFUSED means a gate refused BEFORE spending anything and writes
+    billed=false. A content_filter or provider abort WAS requested and billed; mapping it
+    to REFUSED would silently under-count the cap.
+    """
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    block = src[src.index('BILLED="true"'):][:400]
+    assert "ERROR" not in block.split("case")[1].split("esac")[0], (
+        "ERROR must not be in the not-billed set — the request was made"
+    )
+
+
+@pytest.mark.parametrize("finish", ["stop", None])
+def test_normal_completions_are_still_ok(monkeypatch, finish):
+    result, _env = _classify(monkeypatch, finish, "real findings")
+    assert result == "OK"
+
+
+def test_length_is_still_truncated_not_error(monkeypatch):
+    result, _env = _classify(monkeypatch, "length", "partial findings")
+    assert result == "TRUNCATED"

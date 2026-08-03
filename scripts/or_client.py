@@ -372,6 +372,29 @@ def chat(
                 ),
             }
         return "TRUNCATED", env
+    # A provider that SAYS the generation failed must not be reported as success.
+    # Only `length`/`max_tokens` were special-cased above; every other finish_reason fell
+    # through to OK as long as any content existed. So `finish_reason: "error"` — which
+    # cohere/north-mini-code returns on a large prompt, alongside a partial answer — was
+    # reported as a clean review, and Claude would triage a failed generation as complete.
+    # Same for `content_filter`, where the model declined and the partial text is not a
+    # review at all.
+    #
+    # These stay ERROR rather than becoming REFUSED: in this skill REFUSED means a gate
+    # refused BEFORE spending anything and writes billed=false, whereas these requests
+    # were made and billed. Getting that wrong would corrupt cap accounting.
+    if finish in ("error", "content_filter"):
+        return "ERROR", {
+            **env,
+            "error": (
+                f"finish_reason={finish!r}"
+                + (" — the model or provider aborted the generation."
+                   if finish == "error" else
+                   " — the model declined to answer (content filter).")
+                + f" {len((content or '').strip())} chars of partial output were kept;"
+                " they are NOT a complete review."
+            ),
+        }
     if not (content or "").strip():
         return "ERROR", {**env, "error": "empty content", "raw": parsed}
     return "OK", env
