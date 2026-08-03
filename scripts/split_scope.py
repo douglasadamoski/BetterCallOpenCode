@@ -52,8 +52,9 @@ def main() -> int:
     patterns = pack_context.load_gitignore(root)
     withheld_by_name: List[str] = []
     pruned: List[str] = []
+    symlinks: List[str] = []
     ranked = sorted(
-        pack_context.iter_files(root, patterns, withheld_by_name, pruned),
+        pack_context.iter_files(root, patterns, withheld_by_name, pruned, symlinks),
         key=lambda x: (-x[0], x[2]),
     )
 
@@ -97,12 +98,14 @@ def main() -> int:
         text = raw.decode("utf-8", errors="replace")
         if truncated:
             text += f"\n\n… [truncated at {args.max_file_bytes} bytes]\n"
-        block = f"## File: {rel}\n```text\n{text}\n```\n\n"
+        f = pack_context.fence_for(text)
+        block = f"## File: {rel}\n{f}text\n{text}\n{f}\n\n"
         t = approx_tokens(block)
         if t > budget:
             keep = budget * 4
             text = text[:keep] + "\n\n… [truncated for chunk budget]\n"
-            block = f"## File: {rel}\n```text\n{text}\n```\n\n"
+            f = pack_context.fence_for(text)
+            block = f"## File: {rel}\n{f}text\n{text}\n{f}\n\n"
             t = approx_tokens(block)
         if cur and cur_tok + t > budget:
             flush()
@@ -119,6 +122,7 @@ def main() -> int:
         "secrets_skipped_by_name": sorted(withheld_by_name),
         "secrets_skipped_by_content": sorted(withheld_by_content),
         "pruned_dirs": sorted(pruned),
+        "symlinks_skipped": sorted(symlinks),
     }
     print(json.dumps(out, indent=2))
     return 0

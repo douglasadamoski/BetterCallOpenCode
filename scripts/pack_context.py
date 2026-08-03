@@ -125,15 +125,55 @@ _SECRET_KEY = (
     rb"|private[_-]?token|client[_-]?secret|refresh[_-]?token|session[_-]?key)"
 )
 SECRET_ASSIGN_RE = re.compile(
-    # AWS secret keys are unquoted base64-ish and long.
+    # AWS secret keys are unquoted base64-ish and long; no value group, always a hit.
     rb"aws_secret_access_key[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{30,}"
-    # Quoted value: 6+ chars is enough because the quotes bound it unambiguously.
-    rb"|" + _SECRET_KEY + rb"[\"']?\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']"
-    # UNQUOTED value: needs to be longer and to look random, or every
-    # `password: see-vault` note in a README trips it.
-    rb"|" + _SECRET_KEY + rb"\s*[:=]\s*[A-Za-z0-9_+/=.-]{16,}(?:\s|$)",
+    # Everything else: capture the value to end-of-line and CLASSIFY it. Matching the
+    # value with a charset was wrong in both directions — `[A-Za-z0-9_+/=.-]` missed
+    # `P@ssw0rd…` and `abc…!`, while matching at all withheld ordinary source like
+    # `accessToken = request.headers.authorization`.
+    rb"|" + _SECRET_KEY + rb"[\"']?\s*[:=][ \t]*(?P<val>[^\n\r]{4,})",
     re.I,
 )
+
+# A value that is a reference to a credential is not a credential. `process.env.X`,
+# `settings.API_KEY` and `getpass.getpass()` are the normal, correct way to handle
+# secrets — withholding those files creates large "not reviewed" holes in exactly the
+# security-relevant code a reviewer most needs to see.
+_CODE_REF_RE = re.compile(rb"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$")
+_CALLABLE_RE = re.compile(rb"[(){}\[\]]")
+
+
+def _value_is_credential_like(v: bytes) -> bool:
+    """Does this right-hand side look like a literal secret, rather than a reference?"""
+    v = v.strip()
+    # Strip one layer of quoting plus trailing punctuation. Backticks are included
+    # because prose quotes code in markdown spans: without this, a comment reading
+    # `accessToken = request.headers.authorization`. classified as a live credential —
+    # which is how this file came to withhold itself for the fourth time.
+    v = v.strip(b"\"'`").strip().rstrip(b",;.").strip().strip(b"\"'`")
+    if len(v) < 8:
+        return False
+    if PLACEHOLDER_RE.search(v):
+        return False
+    if _CODE_REF_RE.match(v) or _CALLABLE_RE.search(v):
+        return False
+    if b" " in v or b"\t" in v:
+        return False          # prose, not a token
+    try:
+        txt = v.decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    classes = sum(
+        (
+            any(c.islower() for c in txt),
+            any(c.isupper() for c in txt),
+            any(c.isdigit() for c in txt),
+            any(not c.isalnum() for c in txt),
+        )
+    )
+    # Two character classes over 12 chars, or three over 8 — enough to separate
+    # `Tr0ub4dor&3xK` and `abcdefghijklmnop!` from `see-vault` and `TODO`.
+    return (classes >= 2 and len(v) >= 12) or (classes >= 3 and len(v) >= 8)
 
 
 # Values that are obviously illustrative rather than live. The assignment heuristic is
@@ -166,10 +206,10 @@ def looks_secret_content(data: bytes) -> bool:
     # `example_api_key` or `test_token` would otherwise suppress a real credential
     # assigned to it, because "example"/"test" appeared anywhere in the matched text.
     for m in SECRET_ASSIGN_RE.finditer(data):
-        blob = m.group(0)
-        idx = max(blob.rfind(b"="), blob.rfind(b":"))
-        value = blob[idx + 1:] if idx >= 0 else blob
-        if not PLACEHOLDER_RE.search(value):
+        val = m.groupdict().get("val")
+        if val is None:
+            return True          # the AWS branch has no value group; it is always a hit
+        if _value_is_credential_like(val):
             return True
     return False
 
@@ -414,6 +454,17 @@ def iter_files(
             yield rank_file(full, rel), full, rel
 
 
+def fence_for(text: str) -> str:
+    """A fence longer than the longest backtick run in `text`.
+
+    Files are embedded in Markdown fences. A reviewed repo containing ``` could close
+    its own block early and have the rest of the file read as prompt text rather than
+    as data under review — a prompt-injection channel that costs the attacker nothing.
+    """
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def est_tokens(s: str) -> int:
     # rough: 4 chars ≈ 1 token
     return max(1, (len(s) + 3) // 4)
@@ -494,7 +545,8 @@ def pack(
         text = raw.decode("utf-8", errors="replace")
         if was_trunc:
             text = text + f"\n\n… [truncated at {max_file_bytes} bytes]\n"
-        block = f"## File: {rel}\n```text\n{text}\n```\n\n"
+        f = fence_for(text)
+        block = f"## File: {rel}\n{f}text\n{text}\n{f}\n\n"
         t = est_tokens(block)
         if used + t > budget:
             # try a smaller head of the file
@@ -503,7 +555,8 @@ def pack(
                 skipped.append({"path": rel, "reason": "token budget"})
                 continue
             text2 = text[:head_len] + "\n\n… [truncated for token budget]\n"
-            block = f"## File: {rel}\n```text\n{text2}\n```\n\n"
+            f = fence_for(text2)
+            block = f"## File: {rel}\n{f}text\n{text2}\n{f}\n\n"
             t = est_tokens(block)
             if used + t > budget:
                 skipped.append({"path": rel, "reason": "token budget"})

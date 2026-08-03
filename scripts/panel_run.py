@@ -65,6 +65,29 @@ _or_client = importlib.util.module_from_spec(_or_spec)
 _or_spec.loader.exec_module(_or_client)
 
 
+# Mirrors bcoc_redact in _bcoc_common.sh. The error snippet below is written into
+# summary.csv INSIDE the user's project — the file most likely to be committed unread —
+# and the old comment claimed it was redacted while nothing redacted it.
+_REDACT = [
+    (re.compile(rb"(?i)bearer\s+[A-Za-z0-9._~+/-]{8,}"), b"Bearer ***"),
+    (re.compile(rb"(?i)authorization:\s*[A-Za-z0-9._~+/-]{8,}"), b"Authorization: ***"),
+    (re.compile(rb"sk-(or-v1|ant|proj)-[A-Za-z0-9_-]+"), b"sk-***"),
+    (re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}"), b"gh*_***"),
+    (re.compile(rb"github_pat_[A-Za-z0-9_]{20,}"), b"github_pat_***"),
+    (re.compile(rb"xox[bpasr]-[A-Za-z0-9-]{10,}"), b"xox*-***"),
+    (re.compile(rb"(AKIA|ASIA)[0-9A-Z]{16}"), b"AKIA***"),
+    (re.compile(rb"AIza[A-Za-z0-9_-]{30,}"), b"AIza***"),
+    (re.compile(rb"(?i)(api[_-]?key|access[_-]?token|secret)([\"'=: ]+)[^\s\"']+"), rb"\1\2***"),
+]
+
+
+def redact(text: str) -> str:
+    b = (text or "").encode("utf-8", "replace")
+    for rx, sub in _REDACT:
+        b = rx.sub(sub, b)
+    return b.decode("utf-8", "replace")
+
+
 def _cap_used_today() -> Optional[int]:
     """Billed rows in today's ledger, or None if it cannot be read.
 
@@ -299,7 +322,7 @@ def run_one(
     if result not in ("OK", "TRUNCATED"):
         # keep a short redacted error snippet
         err = (stderr or stdout)[-300:].replace("\n", " ")
-        row["error"] = err[:200]
+        row["error"] = redact(err)[:200]
     print(
         f"[{idx}/{total}] {result:10s} {model}  "
         f"finish={row['finish_reason'] or '?'}  "
@@ -457,7 +480,7 @@ def main() -> int:
                                 "elapsed_s": 0,
                                 "rate_wait_s": 0,
                                 "report": "",
-                                "error": str(e)[:200],
+                                "error": redact(str(e))[:200],
                             }
                         )
         # stable order by model list
@@ -551,5 +574,54 @@ def main() -> int:
     return 0
 
 
+class _ResultWatcher:
+    """A stdout proxy that notices whether a RESULT= line was ever written."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.saw_result = False
+
+    def write(self, data):
+        if "RESULT=" in data:
+            self.saw_result = True
+        return self._stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _main_guarded() -> int:
+    """Wrap main() so no exit path can escape without a RESULT= line.
+
+    main() has several early returns (missing prompt, no model source, every model
+    skipped as paid, roster fetch failure) and argparse can SystemExit(2). multi_review.sh
+    delegates straight to this module, so any of those ended the whole multi-model path
+    with no machine-readable result — the exact contract Claude branches on. Watching
+    stdout catches the early returns that exist today AND any added later.
+    """
+    watcher = _ResultWatcher(sys.stdout)
+    real_stdout = sys.stdout
+    sys.stdout = watcher
+    rc = 1
+    word = "ERROR"
+    try:
+        rc = main()
+        if rc == 2:
+            word = "BAD_ARGS"
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 2
+        word = "BAD_ARGS" if rc == 2 else ("OK" if rc == 0 else "ERROR")
+    except KeyboardInterrupt:
+        rc, word = 130, "INTERRUPTED"
+    except Exception as e:  # noqa: BLE001 — last-resort contract guard
+        print(f"panel_run: unhandled error: {e}", file=sys.stderr)
+        rc, word = 1, "ERROR"
+    finally:
+        sys.stdout = real_stdout
+    if not watcher.saw_result:
+        print(f"RESULT={word}", flush=True)
+    return rc
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main_guarded())
