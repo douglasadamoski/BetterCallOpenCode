@@ -156,7 +156,14 @@ def classify_http(code: int, text: str, parsed: Any) -> str:
         return "QUOTA"
     if code == 429:
         return "QUOTA"
-    if code in (404, 405, 502, 503, 504):
+    # 404/405 mean the API ANSWERED and rejected the model id — usually a retired or
+    # mistyped model. Calling that UNREACHABLE contradicted SKILL.md, which defines the
+    # word as "never reached OpenRouter (DNS/network)", and sent the caller looking for a
+    # network fault instead of a bad id. 5xx really is "reached OpenRouter, upstream is
+    # down", which is what UNREACHABLE is for.
+    if code in (404, 405):
+        return "ERROR"
+    if code in (502, 503, 504):
         return "UNREACHABLE"
     if 200 <= code < 300:
         return "OK"

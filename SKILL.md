@@ -185,8 +185,8 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | PAID_BLOCKED | Switch to `:free` or get explicit paid consent |
 | REFUSED | A safety gate refused **before spending anything** — the scope ships `.opencode/plugin/*.js` (opencode would execute it), or the agent's deny rules did not resolve. Read the stderr reason. **Do not** work around it; switch to `--backend or-api` and tell the user why |
 | BAD_ARGS | A bad argument or a failed pre-flight gate. **Nothing was spent** — fix the invocation and re-run freely |
-| UNREACHABLE | Never reached OpenRouter (DNS/network). Not billed. Check connectivity, retry **once** |
-| ERROR | A request was spent and came back unusable. Show report details; don't retry blindly |
+| UNREACHABLE | Reached OpenRouter but not the model — network failure, or upstream 502/503/504. Not billed. Retry **once**; if it persists the provider is down |
+| ERROR | The request was rejected or came back unusable — including a 404/405, which means the **model id is wrong or retired**. Check the id against `list_free_models.py` before retrying |
 | INTERRUPTED | Ctrl-C / SIGTERM. The request was already launched, so it is **counted as billed** — the answer was lost, not the quota |
 | PARTIAL | Multi-model panel: some models failed. **Name which ones** in your summary — a merged critique missing N of M opinions is not a complete review |
 
