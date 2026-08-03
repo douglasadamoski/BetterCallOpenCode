@@ -467,22 +467,30 @@ fi
 # refuse to point opencode at such a repo. Writes and shell ARE blocked by the agent
 # permissions (verified end-to-end against this same hostile repo) — this gate covers
 # the one thing those permissions cannot.
-_oc_plugins="$(find "$PRIMARY/.opencode" -maxdepth 2 \( -name '*.js' -o -name '*.ts' -o -name '*.mjs' \) 2>/dev/null | head -5)"
-if [[ -n "$_oc_plugins" ]]; then
-  {
-    echo "REFUSED: the scope ships executable opencode plugin code:"
-    printf '  %s\n' $_oc_plugins
-    echo
-    echo "opencode imports and runs project plugins before any permission layer exists."
-    echo "Neither --pure nor OPENCODE_DISABLE_PROJECT_CONFIG=1 prevents this in a real"
-    echo "'opencode run' session — measured on opencode $(opencode --version 2>/dev/null || echo '?')."
-    echo "Reviewing this repo with --backend opencode would execute its code on your machine."
-    echo
-    echo "Use --backend or-api instead: it never runs the repo, it only reads text."
-  } >&2
-  record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
-  echo "RESULT=REFUSED"
-  exit 0
+# ANY file under the scope's .opencode/ is a refusal, at any depth. The previous gate
+# was `find -maxdepth 2 \( -name '*.js' -o -name '*.ts' -o -name '*.mjs' \)`, which a
+# malicious repo walks straight past with `.opencode/plugin/nested/evil.js` (depth 3),
+# `.opencode/plugin/evil.cjs`, `.mts`, `.cts`, or a `plugins/` (plural) directory. Since
+# NO flag stops opencode importing a project plugin, extension whack-a-mole is the wrong
+# shape of defence: refuse the whole directory and be done.
+if [[ -d "$PRIMARY/.opencode" ]]; then
+  _oc_entries="$(find "$PRIMARY/.opencode" -mindepth 1 2>/dev/null | head -20)"
+  if [[ -n "$_oc_entries" ]]; then
+    {
+      echo "REFUSED: the scope ships an .opencode/ directory:"
+      printf '  %s\n' $_oc_entries
+      echo
+      echo "opencode imports and RUNS project plugins before any agent, permission or model"
+      echo "exists. Neither --pure nor OPENCODE_DISABLE_PROJECT_CONFIG=1 prevents this in a"
+      echo "real 'opencode run' session — measured on opencode $(opencode --version 2>/dev/null || echo '?')."
+      echo "Reviewing this repo with --backend opencode would execute its code on your machine."
+      echo
+      echo "Use --backend or-api instead: it never runs the repo, it only reads text."
+    } >&2
+    record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
+    echo "RESULT=REFUSED"
+    exit 0
+  fi
 fi
 
 command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
@@ -521,7 +529,11 @@ fi
   printf '%s\n\n' "$PROMPT_TEXT"
   printf '%s\n' "$STAGE_NOTE"
   printf 'You are the outside critic. CRITICIZE and PROPOSE only. Do not edit files.\n'
-  printf 'Scope root: %s\n' "$PRIMARY"
+  # Deliberately NOT $PRIMARY. Printing the real path handed a prompt-injected critic the
+  # absolute location of the UNFILTERED tree, leaving `external_directory: deny` as the
+  # only thing between it and the secrets the mirror exists to withhold. Never name a
+  # path the mirror was built to keep out of reach.
+  printf 'Scope root: . (you are in a filtered copy of the project; some files are withheld)\n'
   printf 'Mode: %s\n' "$MODE"
 } > "$FULL_PROMPT"
 
@@ -551,7 +563,8 @@ export OPENCODE_PERMISSION='{"edit":"deny","write":"deny","patch":"deny","bash":
 SANDBOX_VERIFIED="no"
 _perm_dump="$(opencode agent list 2>/dev/null || true)"
 if printf '%s' "$_perm_dump" | python3 "$_BCOC_SCRIPTS/verify_agent_permissions.py" \
-     "$AGENT_NAME" edit bash webfetch task 2>"$RUN_DIR/perm.err"; then
+     "$AGENT_NAME" edit bash webfetch task external_directory \
+     2>"$RUN_DIR/perm.err"; then
   SANDBOX_VERIFIED="yes"
 fi
 
@@ -632,7 +645,7 @@ emit_report <<REPORT_EOF || { echo "RESULT=ERROR"; exit 1; }
 - **RESULT:** $RESULT
 - **Billed:** $BILLED
 - **opencode exit:** $RC
-- **Enforcement verified:** $SANDBOX_VERIFIED (edit/bash/webfetch/task deny resolved before the run)
+- **Enforcement verified:** $SANDBOX_VERIFIED (edit/bash/webfetch/task/external_directory resolved to deny; opencode folds write+patch into edit)
 - **Project config:** disabled (\`OPENCODE_DISABLE_PROJECT_CONFIG=1\`, \`--pure\`)
 - **Usage ledger:** \`$USAGE_LOG\`
 

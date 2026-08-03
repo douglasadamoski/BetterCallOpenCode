@@ -16,9 +16,20 @@ Two things make this subtle enough to be worth real parsing:
 
   * Resolution is LAST-match-wins. An earlier `edit deny *` followed by a later
     `edit allow *` is an ALLOW. Any check that stops at the first match is wrong.
+  * Only GLOBAL rules decide the global answer. opencode always appends a narrow
+    `external_directory allow <its own tool-output dir>/*` after the denies; taking the
+    last rule regardless of pattern read that as "external_directory is allowed" and
+    refused every run. A path-scoped exception is not a global grant. Narrow allows are
+    reported for visibility and do not flip the verdict.
   * `mode` must be `all`. With `subagent`, `opencode run --agent <name>` REJECTS the
     agent and silently falls back to the permissive built-in `build` agent, so the
     permissions below are never consulted at all.
+
+Note on which permissions exist: `write` and `patch` are NOT opencode permission keys.
+Its config loader folds `tools.write` / `tools.edit` / `tools.patch` into `permission.edit`,
+so asking for them here always reports "allow" — they fall through to the global `* allow *`
+and no deny for them can ever appear. Requiring them made every run refuse. `edit` is the
+key that actually governs all three.
 
 Usage: opencode agent list | verify_agent_permissions.py <agent> <perm> [<perm>...]
 """
@@ -64,16 +75,27 @@ def main() -> int:
         print(f"could not parse the resolved permission list: {e}", file=sys.stderr)
         return 1
 
-    bad = []
+    # Patterns that grant everything. Anything else is a scoped exception.
+    GLOBAL = {"*", "**", "/*", "/**", ""}
+
+    bad, narrow = [], []
     for perm in required:
         action = None
-        for r in rules:                       # last match wins
+        for r in rules:                       # last GLOBAL match wins
             if not isinstance(r, dict):
                 continue
-            if r.get("permission") in (perm, "*"):
+            if r.get("permission") not in (perm, "*"):
+                continue
+            if str(r.get("pattern", "*")) in GLOBAL:
                 action = r.get("action")
+            elif r.get("action") == "allow":
+                narrow.append(f"{perm} allow {r.get('pattern')}")
         if action != "deny":
             bad.append(f"{perm}={action or 'absent'}")
+
+    if narrow:
+        print("note: scoped allow rules present (not a global grant): "
+              + "; ".join(sorted(set(narrow))), file=sys.stderr)
     if bad:
         print("permissions did NOT resolve to deny: " + ", ".join(bad), file=sys.stderr)
         return 1

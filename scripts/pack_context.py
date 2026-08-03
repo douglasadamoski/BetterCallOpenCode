@@ -137,7 +137,7 @@ SECRET_ASSIGN_RE = re.compile(
     # value with a charset was wrong in both directions — `[A-Za-z0-9_+/=.-]` missed
     # `P@ssw0rd…` and `abc…!`, while matching at all withheld ordinary source like
     # `accessToken = request.headers.authorization`.
-    rb"|" + _SECRET_KEY + rb"[\"']?\s*[:=][ \t]*(?P<val>[^\n\r]{4,})",
+    rb"|(?P<key>" + _SECRET_KEY + rb")[\"']?\s*[:=][ \t]*(?P<val>[^\n\r]{4,})",
     re.I,
 )
 
@@ -196,8 +196,17 @@ def _trim_value(v: bytes) -> bytes:
     return v.strip()
 
 
-def _value_is_credential_like(v: bytes) -> bool:
+# Keys strong enough that a quoted multi-word value is far more likely a passphrase than
+# a sentence. A diceware-style value assigned to a password key is a real secret, and a
+# blanket "contains a space means prose" veto packed it. (The example is described rather
+# than written out, per this file's no-literal-matches invariant.)
+_STRONG_KEY_RE = re.compile(rb"pass(?:word|wd)?|secret|api[_-]?key|private[_-]?key", re.I)
+
+
+def _value_is_credential_like(v: bytes, key: bytes = b"") -> bool:
     """Does this right-hand side look like a literal secret, rather than a reference?"""
+    was_quoted = v.strip()[:1] in (b'"', b"'")
+    allow_spaces = was_quoted and _STRONG_KEY_RE.search(key or b"") is not None
     v = _trim_value(v)
     # Backticks are stripped because prose quotes code in markdown spans, and trailing
     # sentence/structure punctuation is not part of the value.
@@ -216,8 +225,12 @@ def _value_is_credential_like(v: bytes) -> bool:
         return False
     if _is_placeholder(v):
         return False
-    if b" " in v or b"\t" in v:
+    if b"\t" in v:
+        return False
+    if b" " in v and not allow_spaces:
         return False          # prose, not a token
+    if b" " in v and len(v) < 12:
+        return False          # too short to be a passphrase
     txt = v.decode("utf-8", errors="replace")
     classes = sum(
         (
@@ -289,7 +302,7 @@ def looks_secret_content(data: bytes) -> bool:
         val = m.groupdict().get("val")
         if val is None:
             return True          # the AWS branch has no value group; it is always a hit
-        if _value_is_credential_like(val):
+        if _value_is_credential_like(val, m.groupdict().get("key") or b""):
             return True
     return False
 
@@ -749,15 +762,27 @@ def mirror(root: Path, dest: Path, max_file_bytes: int = 120_000) -> dict:
     pruned: List[str] = []
     symlinks: List[str] = []
     withheld_by_content: List[str] = []
+    skipped_other: List[str] = []
     copied = 0
 
     for _score, full, rel in iter_files(root, patterns, secrets_by_name, pruned, symlinks):
         try:
+            if full.stat().st_size > max_file_bytes * 4:
+                # Same "too large" rule pack() uses. Without it the mirror handed the
+                # agent whole files or-api would have dropped, so "both backends sit
+                # behind the same filter" was overstated.
+                skipped_other.append(rel)
+                continue
             raw = full.read_bytes()
         except OSError:
             continue
         if looks_secret_content(raw):
             withheld_by_content.append(rel)
+            continue
+        if looks_binary(raw):
+            # pack() drops NUL-bearing files; the mirror copied them, so an encoding
+            # trick could hide content from one path and not the other.
+            skipped_other.append(rel)
             continue
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -770,6 +795,7 @@ def mirror(root: Path, dest: Path, max_file_bytes: int = 120_000) -> dict:
         "root": str(root),
         "mirror": str(dest),
         "files_copied": copied,
+        "skipped_other": sorted(skipped_other),
         "secrets_skipped_by_name": sorted(secrets_by_name),
         "secrets_skipped_by_content": sorted(withheld_by_content),
         "pruned_dirs": sorted(pruned),

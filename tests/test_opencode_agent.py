@@ -107,8 +107,13 @@ def test_review_script_refuses_repos_with_opencode_plugins():
     Refusing such a scope is the only defence available to this skill.
     """
     src = (ROOT / "scripts" / "opencode_review.sh").read_text()
-    assert "_oc_plugins" in src, "the plugin scope-scan is missing"
-    assert 'find "$PRIMARY/.opencode"' in src
+    assert "_oc_entries" in src, "the .opencode scope-scan is missing"
+    assert 'find "$PRIMARY/.opencode" -mindepth 1' in src, (
+        "the scan must cover the WHOLE .opencode tree. An extension+maxdepth filter was "
+        "walked past by .opencode/plugin/nested/evil.js, evil.cjs, evil.mts and plugins/."
+    )
+    scan = src[src.index('find "$PRIMARY/.opencode"'):][:200]
+    assert "-maxdepth" not in scan, "depth-limited .opencode scanning is bypassable"
 
 
 # --- Regressions from the BetterCallGemini review round 1 ------------------------
@@ -201,3 +206,25 @@ def test_opencode_backend_reads_a_filtered_mirror_not_the_raw_scope():
     assert "--mirror-to" in src, "the opencode backend must build a filtered mirror"
     assert '--dir "$MIRROR_DIR"' in src, "the agent must be pointed at the mirror"
     assert '--dir "$PRIMARY"' not in src, "the agent must never see the raw scope"
+
+
+def test_verifier_covers_write_patch_and_external_directory():
+    """The docs claimed "write deny confirmed" while only edit/bash/webfetch/task were
+    checked. An agent denying those four but allowing `write` verified clean."""
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    call = src[src.index("verify_agent_permissions.py"):][:300]
+    # `write`/`patch` are deliberately absent: they are not opencode permission keys —
+    # its loader folds tools.write/edit/patch into permission.edit, so requiring them
+    # made every run refuse on a permission that cannot resolve to deny.
+    for perm in ("edit", "bash", "webfetch", "task", "external_directory"):
+        assert perm in call, f"{perm} is not verified before the run"
+
+
+def test_prompt_never_names_the_real_scope_path():
+    """Printing $PRIMARY handed a prompt-injected critic the absolute path to the
+    UNFILTERED tree, leaving external_directory:deny as the only thing between it and
+    the secrets the mirror exists to withhold."""
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    backend = src[src.index("# ---- backend opencode"):]
+    assert "printf 'Scope root: %s\\n' \"$PRIMARY\"" not in backend
+    assert "filtered copy" in backend

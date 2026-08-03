@@ -624,3 +624,57 @@ def test_nested_call_references_are_not_withheld(tmp_path, line):
     (tmp_path / "app.py").write_text(line + "\n")
     _body, meta = pack_context.pack(tmp_path)
     assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"
+
+
+# --- Regressions from the BetterCallGrok review round 1 --------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["correct horse battery staple", "not a token but a whole phrase 9!"],
+)
+def test_passphrases_with_spaces_are_not_dismissed_as_prose(tmp_path, value):
+    """`if b" " in v: return False` was a structural false negative.
+
+    Diceware-style passphrases are common and contain spaces by design; a blanket
+    "contains a space means prose" veto packed them.
+    """
+    (tmp_path / "app.conf").write_text(_assign("db_password", value) + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {value}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "password: see-vault",
+        "# The client_secret is rotated quarterly.",
+        'description: "the api_key is stored in vault"',
+        'note = "remember to rotate the secret"',
+    ],
+)
+def test_prose_about_secrets_is_still_not_withheld(tmp_path, line):
+    """Allowing spaces must not start withholding documentation."""
+    (tmp_path / "README.md").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"
+
+
+def test_mirror_applies_the_same_binary_and_size_filters_as_pack(tmp_path):
+    """"Both backends sit behind the same filter" has to be literally true.
+
+    mirror() skipped neither NUL-bearing files nor oversized ones, so the opencode agent
+    could see content the or-api path would have dropped.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("x = 1\n")
+    (src / "blob.dat").write_bytes(b"text\x00\x00binary")
+    (src / "huge.txt").write_text("a" * 600_000)
+    dest = tmp_path / "mirror"
+    meta = pack_context.mirror(src, dest, max_file_bytes=120_000)
+    present = sorted(p.name for p in dest.rglob("*") if p.is_file())
+    assert "blob.dat" not in present, "a NUL-bearing file reached the mirror"
+    assert "huge.txt" not in present, "an oversized file reached the mirror"
+    assert "ok.py" in present
+    assert set(meta["skipped_other"]) >= {"blob.dat", "huge.txt"}
