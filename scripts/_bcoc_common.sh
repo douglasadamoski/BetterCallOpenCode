@@ -40,7 +40,7 @@ bcoc_utc_ts() { date -u +%Y%m%dT%H%M%SZ; }
 # What a USER-owned config file may set (~/.config/… and the skill's own dir).
 _BCOC_KEYS_USER="MODEL CAP MAX_TOKENS MAX_INPUT_TOKENS TIMEOUT TEMPERATURE BACKEND \
 STATE_DIR FREE_RPM REASONING_MAX_TOKENS AGENT OPENCODE_CONFIG_DIR ALLOW_PAID \
-KEEP_RUN STRICT_SCAN API_KEY"
+KEEP_RUN STRICT_SCAN API_KEY __OPENROUTER__"
 
 # There is deliberately NO repo-local config allowlist any more.
 #

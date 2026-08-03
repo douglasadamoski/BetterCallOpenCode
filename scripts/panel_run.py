@@ -276,23 +276,35 @@ def run_one(
                     proc.kill()
                 stdout, stderr = proc.communicate()
             stderr = (stderr or "") + "\n[panel] wrapper timed out; sent SIGTERM to its group"
-        elapsed = time.monotonic() - t0
-        row = {
-            "model": model,
-            "result": "TIMEOUT",
-            "finish_reason": "",
-            "prompt_tokens": "",
-            "completion_tokens": "",
-            "reasoning_tokens": "",
-            "total_tokens": "",
-            "cost": "",
-            "elapsed_s": round(elapsed, 1),
-            "rate_wait_s": round(waited, 2),
-            "report": str(out_path),
-            "error": "subprocess timeout",
-        }
-        print(f"[{idx}/{total}] TIMEOUT {model} ({elapsed:.0f}s)", file=sys.stderr, flush=True)
-        return row
+            # ONLY a genuine timeout synthesizes this row. Having it at `else:` level
+            # meant every successfully launched child was reported TIMEOUT and its real
+            # RESULT= and report were discarded — panel mode reported zero usable
+            # reviews after spending every request.
+            elapsed = time.monotonic() - t0
+            # The wrapper's TERM trap may still have printed a word and written a report;
+            # prefer what it actually said over the synthetic one.
+            trap_word = ""
+            for line in reversed((stdout + "\n" + stderr).splitlines()):
+                if line.startswith("RESULT="):
+                    trap_word = line.split("=", 1)[1].strip()
+                    break
+            row = {
+                "model": model,
+                "result": trap_word or "TIMEOUT",
+                "finish_reason": "",
+                "prompt_tokens": "",
+                "completion_tokens": "",
+                "reasoning_tokens": "",
+                "total_tokens": "",
+                "cost": "",
+                "elapsed_s": round(elapsed, 1),
+                "rate_wait_s": round(waited, 2),
+                "report": str(out_path),
+                "error": "subprocess timeout",
+            }
+            print(f"[{idx}/{total}] {row['result']} {model} ({elapsed:.0f}s)",
+                  file=sys.stderr, flush=True)
+            return row
 
     elapsed = time.monotonic() - t0
     # Prefer RESULT= from stdout (wrapper prints it last)
