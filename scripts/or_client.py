@@ -287,14 +287,27 @@ def chat(
         body["reasoning"] = {"effort": effort}
     elif effort == "none":
         body["reasoning"] = {"enabled": False}
+    def _post(b):
+        return http_json("POST", f"{OPENROUTER_BASE}/chat/completions",
+                         auth_headers(api_key), b, timeout)
+
+    reasoning_forced = False
     try:
-        code, text, parsed = http_json(
-            "POST",
-            f"{OPENROUTER_BASE}/chat/completions",
-            auth_headers(api_key),
-            body,
-            timeout,
-        )
+        code, text, parsed = _post(body)
+        # Some endpoints REQUIRE reasoning and reject `enabled: false` outright:
+        #   openai/gpt-oss-20b -> HTTP 400
+        #   "Reasoning is mandatory for this endpoint and cannot be disabled."
+        # The default is `none`, so without this those models became a hard ERROR.
+        # A 400 carries no `usage` and is not billed, so retrying costs one request in
+        # total rather than two — verified against the live API before adding this.
+        if (
+            code == 400
+            and body.get("reasoning", {}).get("enabled") is False
+            and "reasoning is mandatory" in (text or "").lower()
+        ):
+            body["reasoning"] = {"effort": "low"}
+            reasoning_forced = True
+            code, text, parsed = _post(body)
     except TimeoutError as e:
         return "TIMEOUT", {"error": str(e), "model": oc_form, "free": free}
     except ConnectionError as e:
@@ -357,6 +370,7 @@ def chat(
         },
         "id": parsed.get("id"),
         "max_tokens_requested": max_tokens,
+        "reasoning_forced": reasoning_forced,
     }
     # Hit the completion ceiling — response may be incomplete. Still return the body
     # we have so the report is usable; RESULT=TRUNCATED tells Claude not to treat it

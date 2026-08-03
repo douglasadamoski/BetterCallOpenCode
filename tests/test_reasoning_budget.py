@@ -185,3 +185,75 @@ def test_normal_completions_are_still_ok(monkeypatch, finish):
 def test_length_is_still_truncated_not_error(monkeypatch):
     result, _env = _classify(monkeypatch, "length", "partial findings")
     assert result == "TRUNCATED"
+
+
+# --- endpoints that REQUIRE reasoning ---------------------------------------------
+
+
+def test_mandatory_reasoning_endpoint_falls_back_to_effort(monkeypatch):
+    """Some endpoints reject `reasoning: {enabled: false}` outright.
+
+    openai/gpt-oss-20b returns HTTP 400 "Reasoning is mandatory for this endpoint and
+    cannot be disabled." Since `none` is the default, those models became a hard ERROR —
+    a regression introduced by the very fix that stopped the others truncating, and one
+    that only surfaced once report diagnostics started naming the cause.
+
+    The 400 carries no `usage` and is not billed, so the retry costs one request in
+    total, not two.
+    """
+    oc = _fresh_client()
+    monkeypatch.delenv("BCOPENCODE_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("BCOPENCODE_REASONING_MAX_TOKENS", raising=False)
+    sent = []
+
+    def fake_http_json(method, url, headers, body, timeout):
+        sent.append(dict(body.get("reasoning") or {}))
+        if len(sent) == 1:
+            return 400, '{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}', \
+                   {"error": {"message": "Reasoning is mandatory for this endpoint and cannot be disabled."}}
+        return 200, "", {
+            "choices": [{"finish_reason": "stop", "message": {"content": "findings"}}],
+            "usage": {"completion_tokens": 10}, "model": "openai/gpt-oss-20b:free",
+        }
+
+    monkeypatch.setattr(oc, "http_json", fake_http_json)
+    result, env = oc.chat("k", "openai/gpt-oss-20b:free",
+                          [{"role": "user", "content": "x"}], 16000, 0.2, 10)
+    assert sent[0] == {"enabled": False}, "first attempt should use the default"
+    assert sent[1] == {"effort": "low"}, "retry must enable reasoning, not repeat the same body"
+    assert len(sent) == 2, "exactly one retry"
+    assert result == "OK"
+    assert env.get("reasoning_forced") is True, "the report must be able to say the budget changed"
+
+
+def test_other_400s_are_not_retried(monkeypatch):
+    """The fallback must be narrow. A generic 400 is a real error, not a reasoning issue."""
+    oc = _fresh_client()
+    monkeypatch.delenv("BCOPENCODE_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("BCOPENCODE_REASONING_MAX_TOKENS", raising=False)
+    calls = []
+
+    def fake_http_json(method, url, headers, body, timeout):
+        calls.append(1)
+        return 400, '{"error":{"message":"context length exceeded"}}', \
+               {"error": {"message": "context length exceeded"}}
+
+    monkeypatch.setattr(oc, "http_json", fake_http_json)
+    oc.chat("k", "vendor/m:free", [{"role": "user", "content": "x"}], 16000, 0.2, 10)
+    assert len(calls) == 1, "a non-reasoning 400 must not trigger a retry"
+
+
+def test_retry_does_not_fire_when_reasoning_was_not_disabled(monkeypatch):
+    """If the user asked for effort=low, a mandatory-reasoning 400 is not our doing."""
+    oc = _fresh_client()
+    monkeypatch.setenv("BCOPENCODE_REASONING_EFFORT", "low")
+    calls = []
+
+    def fake_http_json(method, url, headers, body, timeout):
+        calls.append(dict(body.get("reasoning") or {}))
+        return 400, '{"error":{"message":"Reasoning is mandatory for this endpoint."}}', \
+               {"error": {"message": "Reasoning is mandatory for this endpoint."}}
+
+    monkeypatch.setattr(oc, "http_json", fake_http_json)
+    oc.chat("k", "vendor/m:free", [{"role": "user", "content": "x"}], 16000, 0.2, 10)
+    assert len(calls) == 1

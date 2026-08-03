@@ -326,8 +326,27 @@ def run_one(
         "error": "",
     }
     if result not in ("OK", "TRUNCATED"):
-        # keep a short redacted error snippet
-        err = (stderr or stdout)[-300:].replace("\n", " ")
+        # Prefer the wrapper's own [!CAUTION] line, which carries the client's message
+        # (finish_reason, HTTP status, provider text). Falling straight to the tail of
+        # stderr captured routine output instead — "Report: /path… Usage today: 7/200" —
+        # so the one column that exists to explain a failure explained nothing, and the
+        # whole taxonomy had to be rebuilt by hand from the reports.
+        err = ""
+        try:
+            if out_path.is_file():
+                m = re.search(r"^> \*\*[A-Z_]+\*\* — (.+)$", out_path.read_text(errors="replace"), re.M)
+                if m:
+                    err = m.group(1).strip()
+        except OSError:
+            pass
+        if not err:
+            for line in reversed((stderr or "").splitlines()):
+                line = line.strip()
+                if line and not line.startswith(("Report:", "Usage today:", "RESULT=")):
+                    err = line
+                    break
+        if not err:
+            err = (stderr or stdout)[-300:].replace("\n", " ")
         row["error"] = redact(err)[:200]
     print(
         f"[{idx}/{total}] {result:10s} {model}  "

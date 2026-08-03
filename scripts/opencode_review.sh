@@ -494,6 +494,15 @@ $(if [[ "$RESULT" == "TRUNCATED" ]]; then
     echo "> Findings may be incomplete. Raise \`--max-tokens\` (default 16384), lower pack size,"
     echo "> or stage the review. Reasoning models burn tokens on thinking before answer text."
     [[ -n "$ERRMSG" ]] && { echo ">"; printf '> %s\n' "$(printf '%s' "$ERRMSG" | bcoc_redact)"; }
+  elif [[ "$RESULT" != "OK" && -n "$ERRMSG" ]]; then
+    # Every non-OK result must say WHY. This block only covered TRUNCATED, so a report
+    # for ERROR/QUOTA/AUTH showed the word and nothing else — the client's message
+    # (which names finish_reason, HTTP status and the actual provider text) was parsed
+    # into ERRMSG and then dropped on the floor. Diagnosing a panel run meant re-running
+    # the model by hand.
+    echo
+    echo "> [!CAUTION]"
+    printf '> **%s** — %s\n' "$RESULT" "$(printf '%s' "$ERRMSG" | bcoc_redact)"
   fi)
 $(if [[ -n "$STAGES" ]]; then echo; echo "- **Stages this turn:** $STAGES"; fi)
 
