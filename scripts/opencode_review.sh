@@ -150,6 +150,11 @@ if [[ "$_HOME_REAL" == "$PRIMARY"/* ]]; then
   die "Refusing --scope $PRIMARY: it contains your home directory."
 fi
 
+if [[ -f "$PRIMARY/.bettercallopencode.env" ]]; then
+  echo "bcoc: NOTE $PRIMARY/.bettercallopencode.env exists and is being IGNORED." >&2
+  echo "bcoc: the project under review does not get to configure its own review." >&2
+fi
+
 bcoc_have_python || die "python3 is required"
 TIMEOUT_BIN="$(bcoc_resolve_timeout)" || die "neither 'timeout' nor 'gtimeout' found (macOS: brew install coreutils)"
 

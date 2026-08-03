@@ -65,8 +65,12 @@ export BCOPENCODE_STATE_DIR="$HOME/.bettercallopencode"
 # export BCOPENCODE_ALLOW_PAID=1
 ```
 
-Optional config files (KEY=VALUE only, **not** shell-sourced):
-`~/.config/bettercallopencode/config.env`, `.bettercallopencode.env`.
+Optional config files (KEY=VALUE only, **not** shell-sourced), user-owned locations only:
+`~/.config/bettercallopencode/config.env` and `$SKILL_DIR/.bettercallopencode.env`.
+
+A `.bettercallopencode.env` **inside the project under review is ignored** — the reviewed
+repository is untrusted input and does not get to configure its own review. If one is
+present you get a note on stderr.
 
 Smoke:
 

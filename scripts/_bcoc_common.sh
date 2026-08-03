@@ -42,20 +42,15 @@ _BCOC_KEYS_USER="MODEL CAP MAX_TOKENS MAX_INPUT_TOKENS TIMEOUT TEMPERATURE BACKE
 STATE_DIR FREE_RPM REASONING_MAX_TOKENS AGENT OPENCODE_CONFIG_DIR ALLOW_PAID \
 KEEP_RUN STRICT_SCAN API_KEY"
 
-# What a file inside the REVIEWED REPO may set. Deliberately tiny.
+# There is deliberately NO repo-local config allowlist any more.
 #
-# The reviewed repository is untrusted input. A `.bettercallopencode.env` committed to a
-# project used to be loaded LAST, so it beat the user's own config and could set
-# BCOPENCODE_ALLOW_PAID=1 (spend the user's credits), BCOPENCODE_UNSAFE_OPENCODE=1 and
-# BCOPENCODE_BACKEND=opencode (run an unrestricted agent with shell access), or
-# OPENROUTER_API_KEY (bill the whole packed codebase to an attacker's account, where
-# prompt logging can read it). Reproduced end to end. None of those are on this list,
-# and OPENROUTER_* is never accepted from a repo at all.
-# MODEL and MAX_INPUT_TOKENS are deliberately NOT here. A repo choosing the model picks
-# which third party sees its reviewer's codebase and can steer toward a weaker critic;
-# a repo raising MAX_INPUT_TOKENS decides how much of YOUR code gets uploaded. Neither is
-# a decision the reviewed project gets to make. Set them in your own config or on the CLI.
-_BCOC_KEYS_REPO="MAX_TOKENS TIMEOUT TEMPERATURE FREE_RPM REASONING_MAX_TOKENS"
+# A `.bettercallopencode.env` inside the project under review was loaded from $(pwd) —
+# not even from the resolved --scope, so running the skill from an unrelated directory
+# let THAT directory influence the review while the actual repo's file was ignored.
+# Every key it could still set (MAX_TOKENS, TIMEOUT, TEMPERATURE, FREE_RPM,
+# REASONING_MAX_TOKENS) affects cost or how much gets uploaded. None of that is a
+# decision the reviewed project gets to make, and the convenience never justified an
+# untrusted-input channel into the run. Set these in your own config or on the CLI.
 
 _bcoc_key_allowed() {  # $1=bare key (no BCOPENCODE_ prefix), $2=allowlist
   local k
@@ -98,9 +93,6 @@ _bcoc_load_one_config() {  # $1=file, $2=allowlist, $3=label
       echo "bcoc: ignoring $key from $label config ($f) — not permitted from there" >&2
       continue
     fi
-    # Accepted repo-local keys are announced, not just the refused ones: the user must be
-    # able to see every way the project under review influenced this run.
-    [[ "$label" == "repo-local" ]] && echo "bcoc: repo-local config set $key" >&2
     export "$key=$val"
   done < "$f"
 }
@@ -111,9 +103,8 @@ bcoc_load_config_files() {
   for _k in $(compgen -e | grep -E '^(BCOPENCODE_|OPENROUTER_)' || true); do
     _BCOC_PRESET["$_k"]=1
   done
-  # Repo-local FIRST so the user's own config, loaded after, always wins over a value
-  # supplied by the project under review.
-  _bcoc_load_one_config "$(pwd)/.bettercallopencode.env" "$_BCOC_KEYS_REPO" "repo-local"
+  # User-owned locations only. The reviewed repository is untrusted input and gets no
+  # say in how the review is configured.
   _bcoc_load_one_config "$SKILL_DIR/.bettercallopencode.env" "$_BCOC_KEYS_USER" "skill"
   _bcoc_load_one_config "$HOME/.config/bettercallopencode/config.env" "$_BCOC_KEYS_USER" "user"
   _bcoc_load_one_config \

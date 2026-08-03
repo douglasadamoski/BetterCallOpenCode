@@ -283,3 +283,21 @@ def test_skill_md_documents_every_word_the_scripts_emit():
     emitted &= DOCUMENTED
     missing = emitted - documented
     assert not missing, f"emitted but not in the SKILL.md RESULT table: {sorted(missing)}"
+
+
+def test_repo_local_config_is_ignored_entirely(env, prompt, scope, tmp_path):
+    """The project under review does not get to configure its own review.
+
+    A `.bettercallopencode.env` was loaded from $(pwd) — not even the resolved --scope,
+    so running the skill from an unrelated directory let THAT directory influence the
+    run while the actual repo's file was ignored. Every key it could set affects cost
+    or how much source gets uploaded, so the feature was removed rather than relocated.
+    """
+    (scope / ".bettercallopencode.env").write_text(
+        "BCOPENCODE_ALLOW_PAID=1\nBCOPENCODE_MAX_TOKENS=99999\nBCOPENCODE_TEMPERATURE=1.9\n"
+    )
+    p = run(["--model", "openai/gpt-4o", "--prompt-file", str(prompt),
+             "--out", str(tmp_path / "o.md"), "--scope", str(scope)], env, cwd=str(scope))
+    # ALLOW_PAID must not have been honoured.
+    assert_contract(p, "PAID_BLOCKED")
+    assert "being IGNORED" in p.stderr
