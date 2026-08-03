@@ -48,6 +48,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Validate numerics BEFORE any arithmetic: `--max-workers abc` died in `[[ $X -gt 0 ]]`
+# under set -u before printing RESULT=, and multi_review is the whole panel entrypoint.
+for _pair in "cap:$CAP" "rpm:$RPM" "max-workers:$MAX_WORKERS" "max-tokens:$MAX_TOKENS" \
+             "max-input-tokens:$MAX_INPUT" "timeout:$TIMEOUT" "sleep:$SLEEP_S"; do
+  _name="${_pair%%:*}"; _val="${_pair#*:}"
+  [[ "$_val" =~ ^[0-9]+$ ]] || die "--$_name must be a non-negative integer (got: $_val)"
+done
+
 [[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]] || die "Need --prompt-file"
 [[ -n "$OUT_DIR" ]] || die "Need --out-dir"
 mkdir -p "$OUT_DIR"
