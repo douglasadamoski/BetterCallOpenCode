@@ -477,3 +477,53 @@ def test_trimming_cannot_create_a_false_negative(tmp_path, content):
     (tmp_path / "app.conf").write_text(content + "\n")
     _body, meta = pack_context.pack(tmp_path)
     assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {content}"
+
+
+# --- Regressions from the BetterCallChatGPT review round 5 -----------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "A1!bcdefgh(ijklmnop)",     # brackets inside a real password
+        "A1!bcdefgh[ijklmnop]",
+        "A1!bcdef<ghij>klmnop",     # placeholder-SHAPED fragment inside a live value
+        "A1!bcdef${GHIJ}klmnop",
+        "A1!bcdef{{GHIJ}}klmnop",
+    ],
+)
+def test_substring_exemptions_cannot_hide_a_real_secret(tmp_path, value):
+    """The code and placeholder checks must FULLMATCH the scalar, not substring it.
+
+    As substring tests, "contains (…)" dismissed a password with brackets as code, and
+    "contains <…>" dismissed one containing a placeholder-shaped fragment as
+    illustrative. Both leaked.
+    """
+    (tmp_path / "app.conf").write_text(_assign("password", value) + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {value}"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["aVeryLongUnquotedSecret12345", "abcdefghij0123456789XYZ", "xyz1234567890abcdefgh"],
+)
+def test_identifier_shaped_values_are_still_secrets(tmp_path, value):
+    """A bare identifier is not evidence of code.
+
+    Requiring only "looks like an identifier" let three real secrets through, because
+    `aVeryLongUnquotedSecret12345` is a perfectly valid identifier. Code needs a dotted
+    path, a call, or a subscript.
+    """
+    (tmp_path / "app.conf").write_text(_assign("api_key", value, quote="", sep=": ") + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"], f"leaked: {value}"
+
+
+def test_envrc_is_secret_by_name():
+    """Only hidden DIRECTORIES are pruned, so `.envrc` reached the content heuristic.
+
+    It commonly holds exports, tokens and secret-bearing URLs.
+    """
+    assert pack_context.is_secret(Path(".envrc"), ".envrc")
+    assert pack_context.is_secret(Path(".direnv/x"), ".direnv/x")

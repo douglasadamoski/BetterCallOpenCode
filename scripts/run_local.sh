@@ -21,7 +21,9 @@
 set -uo pipefail
 
 ENV="${BCOPENCODE_CONDA_ENV:-base}"; TIMEOUT=600; SANDBOX=""; SCRIPT=""; INTERP=""; ARGS=()
-ENV_EXPLICIT=""; DRY_RUN=""
+# An env var naming an environment is as explicit as the flag: falling back to the
+# ambient interpreter would silently run somewhere the user did not choose.
+ENV_EXPLICIT="${BCOPENCODE_CONDA_ENV:+1}"; DRY_RUN=""
 # Reject a missing value being swallowed from the next option (e.g. `--sandbox --script`).
 need() { [[ -n "${2:-}" && "${2:0:1}" != "-" ]] || { echo "ERROR: $1 needs a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do

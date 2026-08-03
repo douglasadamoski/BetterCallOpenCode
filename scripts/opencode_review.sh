@@ -217,6 +217,14 @@ if grep -qE '\{\{[A-Z_]+\}\}' "$PROMPT_FILE" 2>/dev/null; then
   die "Fill the template before spending a request."
 fi
 
+# Fail closed BEFORE spending if the ledger cannot be appended to. Discovering that
+# after the request is paid for means the cap silently undercounts from then on.
+if [[ -e "$USAGE_LOG" && ! -w "$USAGE_LOG" ]]; then
+  echo "Ledger exists but is not writable: $USAGE_LOG" >&2
+  echo "Refusing to spend a request the cap could not record." >&2
+  bcoc_cleanup; echo "RESULT=ERROR"; exit 1
+fi
+
 USED="$(bcoc_cap_used | tr -d '[:space:]')"
 if [[ "$USED" == "UNAVAILABLE" ]]; then
   # Fail CLOSED. The old code turned an unreadable ledger into 0, so the cap silently
@@ -268,11 +276,14 @@ emit_report() {  # stdin = report body
 
 record_call() {  # $1=result ... token args
   [[ "$BCOC_LEDGER_DONE" -eq 1 ]] && return 0
-  BCOC_LEDGER_DONE=1
-  bcoc_usage_append "$@" || {
+  if bcoc_usage_append "$@"; then
+    BCOC_LEDGER_DONE=1
+  else
+    # Deliberately NOT marked done: a later trap gets another chance to record the
+    # spent request rather than believing it already did.
     echo "bcoc: ledger append failed — today's cap may undercount." >&2
-    return 0
-  }
+  fi
+  return 0
 }
 
 if [[ "$BACKEND" == "or-api" ]]; then
@@ -495,7 +506,6 @@ fi
 OC_OUT="$RUN_DIR/opencode.out"
 OC_ERR="$RUN_DIR/opencode.err"
 
-BCOC_BILLED=1
 # Three layers, all required. Verified live on opencode 1.18.11 — see
 # references/opencode_notes.md for the experiments.
 #
@@ -536,6 +546,10 @@ fi
 
 # -f, not "$(cat …)": passing the prompt through argv is ARG_MAX-bounded, strips trailing
 # newlines, and puts the whole prompt in `ps` output for every local user to read.
+# From here the request is assumed spent. Set AFTER every gate: an interrupt during the
+# permission verification above used to record a billed row for a model that was never
+# invoked, which is the same accounting lie as failing to record one that was.
+BCOC_BILLED=1
 # Argument order matters: BOTH `message` and `-f/--file` are yargs *arrays*, so
 # `-f FILE "msg"` swallows the message as a second filename and opencode dies with
 # "File not found: <your message>". Message first, -f last with nothing after it.

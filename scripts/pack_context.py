@@ -52,7 +52,7 @@ OWN_OUTPUT_RE = re.compile(
 SECRET_NAME_RE = re.compile(
     # NB `\.env` must NOT require a leading dot: `prod.env` and `env.production` are
     # extremely common real filenames and both walked straight through the first version.
-    r"((^|/|\.)env($|\..*$)|(^|/)env\..*$|"
+    r"((^|/|\.)env($|\..*$)|(^|/)env\..*$|(^|/)\.envrc$|(^|/)\.direnv(/|$)|"
     r"(^|/)creds?(\.|$)|(^|/)credentials(\.|$)|"
     r"\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|\.ppk$|\.keystore$|"
     r"(^|/)id_rsa|(^|/)id_ed25519|(^|/)id_ecdsa|(^|/)id_dsa|"
@@ -139,12 +139,24 @@ SECRET_ASSIGN_RE = re.compile(
 
 # A value that is a reference to a credential is not a credential. `process.env.X`,
 # `settings.API_KEY` and `getpass.getpass()` are the normal, correct way to handle
-# secrets — withholding those files creates large "not reviewed" holes in exactly the
-# security-relevant code a reviewer most needs to see.
-_CODE_REF_RE = re.compile(rb"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$")
-# A call or a subscript means this is code, not a literal: `getpass.getpass()`,
-# `os.environ['TOKEN']`. A LONE brace does not — a password may legitimately contain one.
-_CALLABLE_RE = re.compile(rb"\([^)]*\)|\[[^\]]*\]")
+# secrets — withholding those files punches holes in exactly the security-relevant code
+# a reviewer most needs to see.
+#
+# FULLMATCH, not substring. A substring test for "contains (…) or […]" meant a real
+# password containing brackets — `A1!bcdefgh(ijklmnop)` — was dismissed as code.
+# The whole scalar must BE an identifier path, optionally called or subscripted.
+#
+# It also requires POSITIVE evidence of code — a dotted path, a call, or a subscript.
+# A bare identifier is not enough: `aVeryLongUnquotedSecret12345` is a perfectly valid
+# identifier, and treating identifier-shaped values as code let three real secrets
+# straight through.
+_CODE_VALUE_RE = re.compile(
+    rb"^[A-Za-z_$][\w$]*"                               # ident
+    rb"(?:"
+    rb"(?:\.[A-Za-z_$][\w$]*)+(?:\([^()]*\)|\[[^\[\]]*\])*"  # a.b / a.b() / a.b['c']
+    rb"|(?:\([^()]*\)|\[[^\[\]]*\])+"                        # f() / a['b']
+    rb")$"
+)
 
 
 def _trim_value(v: bytes) -> bytes:
@@ -190,7 +202,7 @@ def _value_is_credential_like(v: bytes) -> bool:
         v = v.strip().strip(b"\"'`").rstrip(b",;.").strip()
         if v == before:
             break
-    if _CODE_REF_RE.match(v) or _CALLABLE_RE.search(v):
+    if _CODE_VALUE_RE.match(v):
         return False
     if len(v) < 8:
         return False
@@ -212,19 +224,25 @@ def _value_is_credential_like(v: bytes) -> bool:
     return (classes >= 2 and len(v) >= 12) or (classes >= 3 and len(v) >= 8)
 
 
-# Values that are obviously illustrative rather than live. The assignment heuristic is
-# deliberately broad, so without this every README showing `API_KEY="sk-or-…"` would be
-# withheld from its own review — including this repo's SKILL.md and README.md.
+# Values that are obviously illustrative rather than live. Without this, every README
+# showing `API_KEY="sk-or-…"` is withheld from its own review — including this repo's.
+#
+# FULLMATCH, again. As a substring test, a live value that merely CONTAINED a
+# placeholder-shaped fragment — `A1!bcdef<ghij>klmnop`, `A1!bcdef${GHIJ}klmnop` — was
+# dismissed as illustrative and leaked. The WHOLE scalar has to be a placeholder.
 PLACEHOLDER_RE = re.compile(
-    rb"\.\.\."
-    rb"|\xe2\x80\xa6"  # UTF-8 ellipsis
-    rb"|<[^>]{0,40}>"           # <your-key>
-    rb"|\$\{[^}]{0,40}\}"        # ${VAULT_SECRET}
-    rb"|\{\{[^}]{0,40}\}\}"      # {{TOKEN}}
-    rb"|\$[A-Z][A-Z0-9_]{2,}"    # $SOME_VAR
-    rb"|\*{3,}|x{4,}|X{4,}"
-    rb"|example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder|redacted"
-    rb"|dummy|fake|sample|todo|insert|replace|hunter2|s3cret|secret[_-]?here",
+    rb"^(?:"
+    rb"<[^>]*>"                       # <your-key>
+    rb"|\$\{[^}]*\}"                  # ${VAULT_SECRET}
+    rb"|\{\{[^}]*\}\}"                # {{TOKEN}}
+    rb"|\$[A-Za-z_][A-Za-z0-9_]*"      # $SOME_VAR
+    rb"|[xX*]{4,}"                    # xxxxxxxx
+    rb"|\.{3,}"                       # ...
+    rb"|\S*\xe2\x80\xa6\S*"            # anything containing a UTF-8 ellipsis
+    rb"|\S*(?:example|your[_-]?|my[_-]?key|changeme|change[_-]?me|placeholder"
+    rb"|redacted|dummy|fake|sample|todo|insert|replace|hunter2|s3cret"
+    rb"|secret[_-]?here|xxx)\S*"       # a single token built around a placeholder word
+    rb")$",
     re.I,
 )
 
