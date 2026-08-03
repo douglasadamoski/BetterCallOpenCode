@@ -586,3 +586,41 @@ def test_source_files_with_secret_looking_names_are_content_scanned(name):
 @pytest.mark.parametrize("name", [".env", "auth.json", "id_rsa", "server.pem", ".env.py"])
 def test_key_material_is_still_skipped_by_name(name):
     assert pack_context.is_secret(Path(name), name), f"{name} must never be packed"
+
+
+def test_mirror_omits_everything_the_packer_would_withhold(tmp_path):
+    """The opencode backend points an agent at a directory, so the filter has to apply
+    to a real directory too — not just to packed text."""
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / ".env").write_text("OPENROUTER_API" + "_KEY=" + FAKE_OPENROUTER + "\n")
+    (src / "id_rsa").write_text(PEM_HEADER + "\n")
+    (src / "sub" / "settings.yaml").write_text("tok" + "en: " + FAKE_GITHUB + "\n")
+    (src / "app.py").write_text("def f():\n    return 1\n")
+    (src / "README.md").write_text("# docs\n")
+
+    dest = tmp_path / "mirror"
+    meta = pack_context.mirror(src, dest)
+
+    present = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
+    assert present == ["README.md", "app.py"]
+    blob = "".join(p.read_text() for p in dest.rglob("*") if p.is_file())
+    for secret in (FAKE_OPENROUTER, FAKE_GITHUB, PEM_HEADER):
+        assert secret not in blob
+    assert ".env" in meta["secrets_skipped_by_name"]
+    assert "sub/settings.yaml" in meta["secrets_skipped_by_content"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'api_key = get_token(env.get("API_KEY"))',
+        'secret = cfg.get("a", fallback())',
+        'token = os.environ.get("TOKEN")',
+    ],
+)
+def test_nested_call_references_are_not_withheld(tmp_path, line):
+    """Forbidding inner parens made `get_token(env.get("API_KEY"))` look like a secret."""
+    (tmp_path / "app.py").write_text(line + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {line}"

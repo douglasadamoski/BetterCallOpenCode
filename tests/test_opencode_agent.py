@@ -109,3 +109,95 @@ def test_review_script_refuses_repos_with_opencode_plugins():
     src = (ROOT / "scripts" / "opencode_review.sh").read_text()
     assert "_oc_plugins" in src, "the plugin scope-scan is missing"
     assert 'find "$PRIMARY/.opencode"' in src
+
+
+# --- Regressions from the BetterCallGemini review round 1 ------------------------
+
+import subprocess
+import sys
+
+VERIFY = ROOT / "scripts" / "verify_agent_permissions.py"
+
+
+def _agent_list(mode="all", edit="deny", bash="deny", webfetch="deny", task="deny"):
+    """A synthetic `opencode agent list` block, in the real output shape."""
+    rules = [{"permission": "*", "action": "allow", "pattern": "*"}]
+    for perm, action in (("edit", edit), ("bash", bash), ("webfetch", webfetch), ("task", task)):
+        rules.append({"permission": perm, "action": action, "pattern": "*"})
+    import json
+    return f"bcoc-review ({mode})\n  {json.dumps(rules, indent=2)}\n"
+
+
+def _verify(dump):
+    p = subprocess.run([sys.executable, str(VERIFY), "bcoc-review",
+                        "edit", "bash", "webfetch", "task"],
+                       input=dump, capture_output=True, text=True, timeout=60)
+    return p.returncode, p.stderr
+
+
+def test_verifier_accepts_a_properly_denied_agent():
+    rc, _ = _verify(_agent_list())
+    assert rc == 0
+
+
+def test_verifier_rejects_a_permissive_agent():
+    """The original check grepped for `"permission": "edit"` and called that proof.
+
+    It matched just as happily when the action was "allow", so verification passed with
+    a fully permissive agent and the "verified before every run" claim was hollow.
+    """
+    rc, err = _verify(_agent_list(edit="allow", bash="allow"))
+    assert rc == 1
+    assert "did NOT resolve to deny" in err
+
+
+def test_verifier_rejects_subagent_mode():
+    """`subagent` makes `opencode run --agent` fall back to the permissive built-in."""
+    rc, err = _verify(_agent_list(mode="subagent"))
+    assert rc == 1
+    assert "mode is not 'all'" in err
+
+
+def test_verifier_honours_last_match_wins():
+    """An earlier deny followed by a later allow is an ALLOW."""
+    import json
+    rules = [
+        {"permission": "edit", "action": "deny", "pattern": "*"},
+        {"permission": "bash", "action": "deny", "pattern": "*"},
+        {"permission": "webfetch", "action": "deny", "pattern": "*"},
+        {"permission": "task", "action": "deny", "pattern": "*"},
+        {"permission": "edit", "action": "allow", "pattern": "*"},   # wins
+    ]
+    rc, err = _verify(f"bcoc-review (all)\n  {json.dumps(rules)}\n")
+    assert rc == 1
+    assert "edit=allow" in err
+
+
+def test_verifier_rejects_a_missing_agent():
+    rc, _ = _verify("someother (all)\n  []\n")
+    assert rc == 1
+
+
+def test_agent_file_is_refreshed_not_just_created():
+    """`if [[ ! -f ]]` meant an installed copy was never updated.
+
+    A user who had run an older version kept its agent file forever — including the
+    `mode: subagent` version whose permissions did nothing. A security fix that never
+    reaches existing installs is not a fix.
+    """
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    assert 'cp -f "$SKILL_DIR/agents/bcoc-review.md"' in src
+    assert 'if [[ ! -f "$AGENT_FILE" ]]; then\n  if [[ -f' not in src
+
+
+def test_opencode_backend_reads_a_filtered_mirror_not_the_raw_scope():
+    """or-api withholds credential-shaped files; opencode handed the agent the raw repo.
+
+    The agent reads a DIRECTORY rather than receiving packed text, so `--dir "$PRIMARY"`
+    bypassed the secret filter entirely and relied on a soft prompt rule not to read
+    `.env` — which a prompt injection in the repo could simply override.
+    """
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    assert "--mirror-to" in src, "the opencode backend must build a filtered mirror"
+    assert '--dir "$MIRROR_DIR"' in src, "the agent must be pointed at the mirror"
+    assert '--dir "$PRIMARY"' not in src, "the agent must never see the raw scope"

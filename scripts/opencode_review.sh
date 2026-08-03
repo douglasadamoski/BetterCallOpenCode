@@ -487,17 +487,34 @@ fi
 
 command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
 
+# The agent reads a DIRECTORY instead of receiving packed text, so pointing --dir at the
+# raw repo bypassed the secret filter completely: `or-api` withholds credential-shaped
+# files while `opencode` handed the agent the lot and relied on a soft prompt rule not to
+# read them. A prompt injection in the repo could simply tell it to. Build a filtered
+# mirror so BOTH backends sit behind the same filter.
+MIRROR_DIR="$RUN_DIR/mirror"
+if ! python3 "$PACK_PY" "$PRIMARY" --mirror-to "$MIRROR_DIR" \
+      --meta-out "$RUN_DIR/mirror_meta.json" >/dev/null 2>"$RUN_DIR/mirror.err"; then
+  echo "Could not build a filtered mirror of the scope:" >&2
+  bcoc_redact < "$RUN_DIR/mirror.err" >&2 2>/dev/null || true
+  bcoc_cleanup; echo "RESULT=ERROR"; exit 1
+fi
+MIRROR_SUMMARY="$(python3 "$_BCOC_SCRIPTS/mirror_summary.py" "$RUN_DIR/mirror_meta.json" 2>/dev/null || echo mirror)"
+
 AGENT_NAME="${BCOPENCODE_AGENT:-bcoc-review}"
 export OPENCODE_CONFIG_DIR="${BCOPENCODE_OPENCODE_CONFIG_DIR:-$SKILL_DIR/opencode-config}"
 mkdir -p "$OPENCODE_CONFIG_DIR/agents" || die "Cannot create $OPENCODE_CONFIG_DIR/agents"
 
 AGENT_FILE="$OPENCODE_CONFIG_DIR/agents/${AGENT_NAME}.md"
-if [[ ! -f "$AGENT_FILE" ]]; then
-  if [[ -f "$SKILL_DIR/agents/bcoc-review.md" ]]; then
-    cp "$SKILL_DIR/agents/bcoc-review.md" "$AGENT_FILE" || die "Cannot install agent file"
-  else
-    die "Missing agents/bcoc-review.md"
-  fi
+# Copy UNCONDITIONALLY when we own the name. `if [[ ! -f ]]` meant an installed copy was
+# never refreshed, so anyone who had run an older version kept its agent file forever —
+# including the `mode: subagent` version whose permissions did nothing at all. A security
+# fix that never reaches existing installs is not a fix.
+if [[ "$AGENT_NAME" == "bcoc-review" ]]; then
+  [[ -f "$SKILL_DIR/agents/bcoc-review.md" ]] || die "Missing agents/bcoc-review.md"
+  cp -f "$SKILL_DIR/agents/bcoc-review.md" "$AGENT_FILE" || die "Cannot install agent file"
+elif [[ ! -f "$AGENT_FILE" ]]; then
+  die "Custom agent '$AGENT_NAME' not found at $AGENT_FILE"
 fi
 
 {
@@ -533,17 +550,16 @@ export OPENCODE_PERMISSION='{"edit":"deny","write":"deny","patch":"deny","bash":
 # read-only claim that was false for months.
 SANDBOX_VERIFIED="no"
 _perm_dump="$(opencode agent list 2>/dev/null || true)"
-if printf '%s' "$_perm_dump" | grep -q "$AGENT_NAME"; then
-  _missing=""
-  for _p in edit bash webfetch task; do
-    printf '%s' "$_perm_dump" | grep -qE "\"permission\": *\"$_p\"" || _missing="$_missing $_p"
-  done
-  [[ -z "$_missing" ]] && SANDBOX_VERIFIED="yes"
+if printf '%s' "$_perm_dump" | python3 "$_BCOC_SCRIPTS/verify_agent_permissions.py" \
+     "$AGENT_NAME" edit bash webfetch task 2>"$RUN_DIR/perm.err"; then
+  SANDBOX_VERIFIED="yes"
 fi
+
 if [[ "$SANDBOX_VERIFIED" != "yes" ]]; then
   echo "REFUSED: could not verify the write/shell deny rules resolved for agent '$AGENT_NAME'." >&2
   echo "  Check: OPENCODE_CONFIG_DIR=\"$OPENCODE_CONFIG_DIR\" opencode agent list" >&2
   echo "  The agent must report mode 'all' (not 'subagent') and trailing deny rules." >&2
+  cat "$RUN_DIR/perm.err" >&2 2>/dev/null || true
   record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
   echo "RESULT=REFUSED"
   exit 0
@@ -560,7 +576,7 @@ BCOC_BILLED=1
 # "File not found: <your message>". Message first, -f last with nothing after it.
 ${SETSID_BIN[@]+"${SETSID_BIN[@]}"} "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
   "Read the attached file: it contains your full review instructions. Follow them and report your findings." \
-  --dir "$PRIMARY" \
+  --dir "$MIRROR_DIR" \
   --agent "$AGENT_NAME" \
   -m "$MODEL" \
   --pure \
@@ -612,6 +628,7 @@ emit_report <<REPORT_EOF || { echo "RESULT=ERROR"; exit 1; }
 - **Model:** \`$MODEL\`
 - **Free model:** $FREE_FLAG
 - **Scope:** \`$PRIMARY\`
+- **Mirror:** $MIRROR_SUMMARY — the agent saw a FILTERED copy, not the raw scope
 - **RESULT:** $RESULT
 - **Billed:** $BILLED
 - **opencode exit:** $RC

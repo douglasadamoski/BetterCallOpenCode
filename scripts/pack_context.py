@@ -154,11 +154,15 @@ SECRET_ASSIGN_RE = re.compile(
 # A bare identifier is not enough: `aVeryLongUnquotedSecret12345` is a perfectly valid
 # identifier, and treating identifier-shaped values as code let three real secrets
 # straight through.
+# The argument list allows ONE level of nesting: `get_token(env.get("API_KEY"))` is
+# ordinary code, and forbidding inner parens made the classifier withhold it — a
+# "not reviewed" hole in exactly the credential-handling code a reviewer needs.
+_ARGS = rb"(?:\((?:[^()]|\([^()]*\))*\)|\[(?:[^\[\]]|\[[^\[\]]*\])*\])"
 _CODE_VALUE_RE = re.compile(
-    rb"^[A-Za-z_$][\w$]*"                               # ident
+    rb"^[A-Za-z_$][\w$]*"                       # ident
     rb"(?:"
-    rb"(?:\.[A-Za-z_$][\w$]*)+(?:\([^()]*\)|\[[^\[\]]*\])*"  # a.b / a.b() / a.b['c']
-    rb"|(?:\([^()]*\)|\[[^\[\]]*\])+"                        # f() / a['b']
+    rb"(?:\.[A-Za-z_$][\w$]*)+" + _ARGS + rb"*"   # a.b / a.b() / a.b['c']
+    rb"|" + _ARGS + rb"+"                          # f() / a['b']
     rb")$"
 )
 
@@ -728,6 +732,51 @@ def default_max_input_tokens() -> int:
         return 28000
 
 
+def mirror(root: Path, dest: Path, max_file_bytes: int = 120_000) -> dict:
+    """Copy the scope into `dest`, omitting everything the packer would withhold.
+
+    The `opencode` backend points an agent at a directory instead of sending it packed
+    text, so it would otherwise read the RAW repository — bypassing the secret filter
+    entirely and contradicting the guarantee the or-api path makes. Pointing it at this
+    mirror puts both backends behind the same filter.
+    """
+    import shutil
+
+    root = root.resolve()
+    dest = dest.resolve()
+    patterns = load_gitignore(root)
+    secrets_by_name: List[str] = []
+    pruned: List[str] = []
+    symlinks: List[str] = []
+    withheld_by_content: List[str] = []
+    copied = 0
+
+    for _score, full, rel in iter_files(root, patterns, secrets_by_name, pruned, symlinks):
+        try:
+            raw = full.read_bytes()
+        except OSError:
+            continue
+        if looks_secret_content(raw):
+            withheld_by_content.append(rel)
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(full, target)
+            copied += 1
+        except OSError:
+            continue
+    return {
+        "root": str(root),
+        "mirror": str(dest),
+        "files_copied": copied,
+        "secrets_skipped_by_name": sorted(secrets_by_name),
+        "secrets_skipped_by_content": sorted(withheld_by_content),
+        "pruned_dirs": sorted(pruned),
+        "symlinks_skipped": sorted(symlinks),
+    }
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("scope", help="Directory to pack")
@@ -736,12 +785,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--max-files", type=int, default=80)
     ap.add_argument("--meta-out", default=None, help="Write JSON metadata")
     ap.add_argument("--out", default=None, help="Write packed text (default stdout)")
+    ap.add_argument("--mirror-to", default=None,
+                    help="Instead of packing, copy the filtered scope into this directory")
     args = ap.parse_args(argv)
 
     root = Path(args.scope)
     if not root.is_dir():
         print(f"Not a directory: {root}", file=sys.stderr)
         return 2
+    if args.mirror_to:
+        import json as _json
+        m = mirror(root, Path(args.mirror_to), args.max_file_bytes)
+        if args.meta_out:
+            with open(args.meta_out, "w", encoding="utf-8") as f:
+                _json.dump(m, f, indent=2)
+        print(_json.dumps(m, indent=2))
+        return 0
     body, meta = pack(root, args.max_input_tokens, args.max_file_bytes, args.max_files)
     if args.meta_out:
         import json
