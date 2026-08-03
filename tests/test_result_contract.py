@@ -172,10 +172,22 @@ def test_unfilled_template_does_not_spend(env, scope, tmp_path):
     assert "INTENT_DESCRIPTION" in p.stderr
 
 
-def test_opencode_backend_refused_without_override(env, prompt, scope, tmp_path):
-    assert_contract(run(["--backend", "opencode", "--prompt-file", str(prompt),
-                         "--out", str(tmp_path / "o.md"), "--scope", str(scope)], env),
-                    "REFUSED")
+def test_opencode_backend_refuses_a_scope_carrying_plugins(env, prompt, scope, tmp_path):
+    """A repo's .opencode/plugin/*.js is imported and executed by opencode before any
+    agent, permission or model exists — arbitrary code execution on the host.
+
+    Verified on 1.18.11 that a real `opencode run` session executes it even with
+    --pure AND OPENCODE_DISABLE_PROJECT_CONFIG=1 (both DO block it for
+    `opencode agent list`, which is what makes this easy to measure wrongly).
+    Refusing the scope is the only defence available to the skill.
+    """
+    plugin_dir = scope / ".opencode" / "plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "evil.js").write_text("import fs from 'fs';\n")
+    p = run(["--backend", "opencode", "--prompt-file", str(prompt),
+             "--out", str(tmp_path / "o.md"), "--scope", str(scope)], env)
+    assert_contract(p, "REFUSED")
+    assert "plugin" in p.stderr.lower()
 
 
 @pytest.mark.parametrize("bad_scope", ["/", "/tmp", "/etc", "/usr"])

@@ -70,12 +70,13 @@ Vendor critics are great until you want **zero marginal cost** multi-model opini
 defaults to OpenRouter **`:free`** models (Nemotron Ultra/Super/Nano, Gemma 4 free, gpt-oss free, …),
 packs the scope and sends it to a plain HTTP endpoint, and leaves every decision with Claude.
 
-> [!CAUTION]
+> [!IMPORTANT]
 > The default `--backend or-api` critic is an HTTP endpoint — no filesystem, no shell, no
-> reach into your machine. The optional `--backend opencode` agentic critic **is not
-> write-restricted today**: on opencode 1.18.11 the `edit: deny` frontmatter is silently
-> ignored and the agent resolves to `permission "*": allow`. It is gated behind
-> `BCOPENCODE_UNSAFE_OPENCODE=1` until enforcement and an edit-guard land. See
+> reach into your machine. The optional `--backend opencode` critic runs locally and is
+> **restricted, not sandboxed**: its write/shell/web deny rules are verified before every
+> run, but opencode still persists the reviewed source outside the scope, and a repo
+> shipping `.opencode/plugin/*.js` would have that code executed — so the skill refuses
+> those scopes. Details and the experiments behind them:
 > [`references/opencode_notes.md`](references/opencode_notes.md).
 
 | Mode | What the free model does | What Claude does |
@@ -102,7 +103,11 @@ Default model: `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`.
 ## Security notes
 
 - Keys only in env / OpenCode auth / local config files — never git or reports.
-- Packer skips secret-shaped files; free-only gate prevents accidental billable models.
+- Packer withholds secret-shaped **filenames** *and* scans file contents for live
+  credential shapes (OpenRouter/Anthropic/GitHub/Slack/AWS/Google tokens, PEM keys).
+  Everything withheld is listed in the pack metadata — never silently dropped.
+- Free-only gate prevents accidental billable models; the shell and Python
+  implementations are parity-tested so they cannot drift.
 - Mode B: **you** review scripts before `run_local.sh` (not a jail).
 - Residual risk: code in the prompt is sent to OpenRouter/upstream — use only for code you accept sharing with that path.
 
@@ -116,7 +121,7 @@ scripts/multi_review.sh       # multi-model fan-out
 scripts/pack_context.py       # scope packer
 templates/                    # critique / experiment / chunk prompts
 references/                   # free models, OpenCode notes, maximize free
-agents/bcoc-review.md         # OpenCode critic agent (NOT write-restricted yet — see notes)
+agents/bcoc-review.md         # OpenCode critic agent (mode: all + permission/tools deny)
 assets/                       # banner art
 ```
 

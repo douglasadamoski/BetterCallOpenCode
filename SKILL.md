@@ -40,11 +40,12 @@ If missing, skip silently. Regenerate:
 
 ## Core principles
 
-1. **Critic does not change the codebase — guaranteed only on `or-api`.** `or-api` is a
-   plain HTTP endpoint: no filesystem, no shell, no reach into your machine. It sees only
-   the packed text this skill sends. **`--backend opencode` currently carries NO such
-   guarantee** and is gated behind `BCOPENCODE_UNSAFE_OPENCODE=1` — see
-   `references/opencode_notes.md`. Never pass `--auto`.
+1. **Critic does not change the codebase.** `or-api` is a plain HTTP endpoint: no
+   filesystem, no shell, no reach into your machine — it sees only the packed text this
+   skill sends. `--backend opencode` runs an agent locally, restricted by an agent file
+   whose deny rules are **verified resolved before every run** (`RESULT=REFUSED` if not).
+   It is restricted, **not sandboxed** — see `references/opencode_notes.md` for exactly
+   what that does and does not cover. Never pass `--auto`.
 2. **Free-only by default.** Models must end with `:free` or be `openrouter/free`. Non-free → `RESULT=PAID_BLOCKED` unless the user **explicitly** asks to spend credits and you pass `--allow-paid` / `BCOPENCODE_ALLOW_PAID=1`.
 3. **Be broad.** Intent-first; invent tests; do not hand over the suite to rubber-stamp.
 4. **Respect free limits.** On AUTH/CAP/QUOTA: **STOP** — no retry loops. Preflight shows free bucket (**50 vs 1000 RPD**) and credits.
@@ -104,19 +105,25 @@ rm -f "$PF"
 
 ### Agentic OpenCode backend
 
-> [!CAUTION]
-> **This backend is not currently write-restricted.** On opencode 1.18.11 the
-> `edit: deny` / `bash: deny` frontmatter in `agents/bcoc-review.md` is silently
-> ignored — `opencode agent list` resolves the agent to `permission "*": allow`.
-> A critic run this way **can write files and run shell** in the reviewed scope.
-> Enforcement + an edit-guard are being added; until then the backend refuses
-> unless you set `BCOPENCODE_UNSAFE_OPENCODE=1`.
-
 ```bash
-BCOPENCODE_UNSAFE_OPENCODE=1 bash "$SKILL_DIR/scripts/opencode_review.sh" ... --backend opencode
+bash "$SKILL_DIR/scripts/opencode_review.sh" ... --backend opencode
 ```
 
-Requires `opencode` on PATH and OpenRouter connected. Prefer `--backend or-api`.
+Requires `opencode` on PATH and OpenRouter connected. Uses agent `bcoc-review`, whose
+`edit`/`bash`/`webfetch`/`task` deny rules are checked against `opencode agent list`
+before the run — if they do not resolve, you get `RESULT=REFUSED` and nothing is spent.
+
+> [!IMPORTANT]
+> **Restricted, not sandboxed.** Verified on opencode 1.18.11: the critic cannot edit
+> files, run shell, or fetch the web, and a reviewed repo cannot re-enable those via its
+> own `.opencode/` agent or `opencode.json`. Two things remain true anyway:
+> - opencode persists the reviewed source and prompts to
+>   `~/.local/share/opencode/{opencode.db,log,snapshot}` — outside the scope, unencrypted.
+> - A repo shipping `.opencode/plugin/*.js` gets that code **executed** by opencode
+>   before any permission layer exists. No flag prevents it, so the skill **refuses**
+>   such a scope (`RESULT=REFUSED`). Review those with `--backend or-api`.
+
+Prefer `--backend or-api`: 1 free request per review, and genuinely no filesystem access.
 
 ## Mode B — Experiment
 
@@ -164,7 +171,7 @@ or `scripts/split_scope.py` for file chunks. Keep each turn short; stop on TIMEO
 | QUOTA | Free RPD/RPM or 402/429 — **STOP**, wait (1000 RPD after $10 top-up; still 20 RPM) |
 | TIMEOUT | Smaller pack / stages; retry **once** |
 | PAID_BLOCKED | Switch to `:free` or get explicit paid consent |
-| REFUSED | A gate refused before spending anything (e.g. `--backend opencode` without `BCOPENCODE_UNSAFE_OPENCODE=1`). Read the stderr reason — **do not** work around it without telling the user what the gate protects |
+| REFUSED | A safety gate refused **before spending anything** — the scope ships `.opencode/plugin/*.js` (opencode would execute it), or the agent's deny rules did not resolve. Read the stderr reason. **Do not** work around it; switch to `--backend or-api` and tell the user why |
 | BAD_ARGS | A bad argument or a failed pre-flight gate. **Nothing was spent** — fix the invocation and re-run freely |
 | UNREACHABLE | Never reached OpenRouter (DNS/network). Not billed. Check connectivity, retry **once** |
 | ERROR | A request was spent and came back unusable. Show report details; don't retry blindly |

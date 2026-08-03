@@ -426,27 +426,45 @@ REPORT_EOF
 fi
 
 # ---- backend opencode -----------------------------------------------------------
-# GATE: this backend has no working write-restriction. Measured on opencode 1.18.11, the
-# `edit: deny` / `bash: deny` frontmatter in agents/bcoc-review.md is silently ignored and
-# `opencode agent list` resolves the agent to `permission "*": allow`. A critic run this
-# way can write files and run shell in the reviewed scope.
-# Reproduce: OPENCODE_CONFIG_DIR="$SKILL_DIR/opencode-config" opencode agent list
-# Remove this gate only once the OPENCODE_PERMISSION deny-set is applied AND verified
-# AND the edit-guard is in place with its selftest green.
-if [[ ! "${BCOPENCODE_UNSAFE_OPENCODE:-}" =~ ^(1|true|yes)$ ]]; then
-  cat >&2 <<'EOF'
-REFUSED: --backend opencode is not write-restricted on this opencode version.
-  The agent's `edit: deny` frontmatter is silently ignored; permissions resolve to "*": allow,
-  so the critic can write files and run shell inside the reviewed scope.
-  Verify yourself:  OPENCODE_CONFIG_DIR="<skill>/opencode-config" opencode agent list
-  Use --backend or-api (no filesystem access at all), or, accepting the risk on a scope
-  you are willing to have modified, re-run with BCOPENCODE_UNSAFE_OPENCODE=1.
-EOF
+# Write/shell restriction is enforced by three layers (see the block before the run
+# below, and references/opencode_notes.md for the live experiments that established
+# them). Each is verified before the run rather than assumed.
+command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
+
+# --- scope scan: refuse a repo that can execute code inside opencode ---------------
+# A repo containing .opencode/plugin/*.js gets that module IMPORTED AND EXECUTED by
+# opencode before any agent, permission or model exists. Verified on 1.18.11 against a
+# real `opencode run` session:
+#
+#   no flags                 -> RCE fired
+#   --pure                   -> RCE fired
+#   OPENCODE_DISABLE_PROJECT_CONFIG=1 -> RCE fired
+#   --pure + DISABLE         -> RCE fired
+#
+# (Both flags DO block it for `opencode agent list`, which is what makes this easy to
+# measure wrongly — the agent-list result does not transfer to a real session.)
+#
+# There is no flag that stops it, so the only defence available to this skill is to
+# refuse to point opencode at such a repo. Writes and shell ARE blocked by the agent
+# permissions (verified end-to-end against this same hostile repo) — this gate covers
+# the one thing those permissions cannot.
+_oc_plugins="$(find "$PRIMARY/.opencode" -maxdepth 2 \( -name '*.js' -o -name '*.ts' -o -name '*.mjs' \) 2>/dev/null | head -5)"
+if [[ -n "$_oc_plugins" ]]; then
+  {
+    echo "REFUSED: the scope ships executable opencode plugin code:"
+    printf '  %s\n' $_oc_plugins
+    echo
+    echo "opencode imports and runs project plugins before any permission layer exists."
+    echo "Neither --pure nor OPENCODE_DISABLE_PROJECT_CONFIG=1 prevents this in a real"
+    echo "'opencode run' session — measured on opencode $(opencode --version 2>/dev/null || echo '?')."
+    echo "Reviewing this repo with --backend opencode would execute its code on your machine."
+    echo
+    echo "Use --backend or-api instead: it never runs the repo, it only reads text."
+  } >&2
   record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
   echo "RESULT=REFUSED"
   exit 0
 fi
-command -v opencode >/dev/null 2>&1 || die "opencode not on PATH (install from https://opencode.ai or use --backend or-api)"
 
 AGENT_NAME="${BCOPENCODE_AGENT:-bcoc-review}"
 export OPENCODE_CONFIG_DIR="${BCOPENCODE_OPENCODE_CONFIG_DIR:-$SKILL_DIR/opencode-config}"
@@ -473,16 +491,58 @@ OC_OUT="$RUN_DIR/opencode.out"
 OC_ERR="$RUN_DIR/opencode.err"
 
 BCOC_BILLED=1
+# Three layers, all required. Verified live on opencode 1.18.11 — see
+# references/opencode_notes.md for the experiments.
+#
+#   B  the agent file's `mode: all` + nested permission:/tools: blocks. This is the
+#      layer that actually holds: OPENCODE_CONFIG_DIR is loaded LAST and permission
+#      matching is LAST-match-wins, so the skill's denies outrank a same-named agent
+#      shipped by the repo under review.
+#   C  OPENCODE_DISABLE_PROJECT_CONFIG=1 + --pure. The reviewed repo can otherwise
+#      supply its own agents, opencode.json, AGENTS.md — and, worst, a
+#      .opencode/plugin/*.js that opencode IMPORTS AND EXECUTES before any agent,
+#      permission or model exists. That is arbitrary code execution on the host that no
+#      permission layer can stop; each of these two env/flag settings closes it.
+#   A  OPENCODE_PERMISSION as defence in depth. On its own it is bypassable by a hostile
+#      project agent (proven), so it is the belt, not the braces.
+export OPENCODE_DISABLE_PROJECT_CONFIG=1
+export OPENCODE_PERMISSION='{"edit":"deny","write":"deny","patch":"deny","bash":"deny","webfetch":"deny","task":"deny","external_directory":"deny"}'
+
+# Verify the denies actually resolved rather than assuming they did. This is free and
+# offline. A guarantee asserted but unverified is how the previous version shipped a
+# read-only claim that was false for months.
+SANDBOX_VERIFIED="no"
+_perm_dump="$(opencode agent list 2>/dev/null || true)"
+if printf '%s' "$_perm_dump" | grep -q "$AGENT_NAME"; then
+  _missing=""
+  for _p in edit bash webfetch task; do
+    printf '%s' "$_perm_dump" | grep -qE "\"permission\": *\"$_p\"" || _missing="$_missing $_p"
+  done
+  [[ -z "$_missing" ]] && SANDBOX_VERIFIED="yes"
+fi
+if [[ "$SANDBOX_VERIFIED" != "yes" ]]; then
+  echo "REFUSED: could not verify the write/shell deny rules resolved for agent '$AGENT_NAME'." >&2
+  echo "  Check: OPENCODE_CONFIG_DIR=\"$OPENCODE_CONFIG_DIR\" opencode agent list" >&2
+  echo "  The agent must report mode 'all' (not 'subagent') and trailing deny rules." >&2
+  record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
+  echo "RESULT=REFUSED"
+  exit 0
+fi
+
 # -f, not "$(cat …)": passing the prompt through argv is ARG_MAX-bounded, strips trailing
 # newlines, and puts the whole prompt in `ps` output for every local user to read.
+# Argument order matters: BOTH `message` and `-f/--file` are yargs *arrays*, so
+# `-f FILE "msg"` swallows the message as a second filename and opencode dies with
+# "File not found: <your message>". Message first, -f last with nothing after it.
 setsid "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
+  "Read the attached file: it contains your full review instructions. Follow them and report your findings." \
   --dir "$PRIMARY" \
   --agent "$AGENT_NAME" \
   -m "$MODEL" \
+  --pure \
   --format default \
   --title "BetterCallOpenCode $TS" \
   -f "$FULL_PROMPT" \
-  "Review the attached prompt file and report your findings." \
   >"$OC_OUT" 2>"$OC_ERR" &
 CLIENT_PID=$!
 wait "$CLIENT_PID"
@@ -531,14 +591,18 @@ emit_report <<REPORT_EOF || { echo "RESULT=ERROR"; exit 1; }
 - **RESULT:** $RESULT
 - **Billed:** $BILLED
 - **opencode exit:** $RC
+- **Enforcement verified:** $SANDBOX_VERIFIED (edit/bash/webfetch/task deny resolved before the run)
+- **Project config:** disabled (\`OPENCODE_DISABLE_PROJECT_CONFIG=1\`, \`--pure\`)
 - **Usage ledger:** \`$USAGE_LOG\`
 
-> [!CAUTION]
-> **This run was NOT write-restricted.** It proceeded only because
-> \`BCOPENCODE_UNSAFE_OPENCODE=1\` was set. On this opencode version the agent's
-> \`edit: deny\` frontmatter is ignored and permissions resolve to \`"*": allow\`,
-> so the critic was able to write files and run shell inside \`$PRIMARY\`.
-> No edit-guard ran. If the scope matters, check \`git status\` before trusting it.
+> [!NOTE]
+> **Write- and shell-restricted, but not sandboxed.** The critic could not edit files,
+> run shell, or fetch the web: the deny rules were confirmed resolved before the run,
+> and the reviewed repo could not supply its own agent, \`opencode.json\`, \`AGENTS.md\`
+> or plugin. What is **not** covered: opencode persists the reviewed source and prompts
+> to \`~/.local/share/opencode/{opencode.db,log,snapshot}\`, outside this scope and
+> unencrypted, and writes into its own \`tool-output/\` remain permitted.
+> For a critic with no filesystem access at all, use \`--backend or-api\`.
 
 ## Critic output
 
