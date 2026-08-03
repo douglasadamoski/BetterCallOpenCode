@@ -199,3 +199,15 @@ review code?" are different questions and the roster tool should still answer th
 Reliability figures are indicative, not stable characteristics of the models. The
 `content-safety` and `gemma-4-31b` verdicts are the robust ones: the first is a category
 error and the second failed every single attempt.
+
+### Validation after the exclusions
+
+Re-ran `--all-free` with the two exclusions in place: **11/13 OK (84%)**, the best result
+recorded. The same 11 models succeeded as in the best prior 15-model run — so the
+exclusions cost no review coverage and save two requests per panel. The two remaining
+failures were `nemotron-nano-12b-v2-vl` (empty content) and `gpt-oss-20b` (429), the two
+models the table already flags as weakest; both are retained but appear in no preset.
+
+`coding-panel` returned 3/4 OK with all four slots producing usable output — the
+non-OK was `openrouter/free` hitting the completion ceiling after writing the longest
+review in the panel, which `TRUNCATED` correctly reports as partial.
