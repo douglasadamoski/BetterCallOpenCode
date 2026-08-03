@@ -132,6 +132,26 @@ unnoticed.
 
 Default model: `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`.
 
+## Reasoning budget
+
+`BCOPENCODE_REASONING_EFFORT` — `none` (default) | `low` | `medium` | `high` | `off`.
+
+Reasoning models count *thinking* against `--max-tokens`. Measured on a real 40k-token
+packed review at `--max-tokens 16000`:
+
+| model | `none` | `low` |
+|---|---|---|
+| `ling-3.0-flash` | OK, 6412 chars | TRUNCATED, 0 usable findings |
+| `nemotron-3-super-120b` | OK, 5 findings | TRUNCATED, 0 findings |
+| `nemotron-3-ultra-550b` | OK, 6 findings | OK, 10 findings |
+
+`ling` ignores `reasoning.max_tokens` entirely. Even `low` let two of three burn the whole
+budget thinking and emit no answer, so the client fell back to scraping their reasoning
+stream — tens of thousands of characters, zero findings. Hence `none` by default: a
+shallower review that exists beats a deeper one that does not. Set `low` per-model when you
+want more depth and know that model tolerates it. `off` sends nothing and takes provider
+defaults. The legacy `BCOPENCODE_REASONING_MAX_TOKENS` still works and wins if set.
+
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) — to use it as a skill (the scripts also run standalone)
@@ -237,7 +257,7 @@ is ignored, loudly, because the repo being reviewed does not get to configure it
 | Backend | `--backend` / `$BCOPENCODE_BACKEND` | `or-api` (or `opencode`) |
 | Daily call cap | `--cap` / `$BCOPENCODE_CAP` | `200` |
 | Completion ceiling | `--max-tokens` / `$BCOPENCODE_MAX_TOKENS` | `16384` |
-| Reasoning budget | `$BCOPENCODE_REASONING_MAX_TOKENS` | `2048` (`0` = provider default) |
+| Reasoning budget | `$BCOPENCODE_REASONING_EFFORT` | `none` — see [Reasoning budget](#reasoning-budget). Legacy `$BCOPENCODE_REASONING_MAX_TOKENS` still honoured and wins if set |
 | Pack size ceiling | `--max-input-tokens` / `$BCOPENCODE_MAX_INPUT_TOKENS` | `80000` |
 | Wall-clock timeout | `--timeout` / `$BCOPENCODE_TIMEOUT` | `600` seconds |
 | Sampling temperature | `--temperature` / `$BCOPENCODE_TEMPERATURE` | `0.2` |

@@ -235,11 +235,40 @@ def chat(
             "model": oc_form,
             "free": False,
         }
-    # Reasoning models (gpt-oss, some Nemotron, etc.) often count *thinking* against
-    # max_tokens. Cap internal reasoning so the completion budget is not all spent
-    # before any visible findings text. Override with BCOPENCODE_REASONING_MAX_TOKENS=0
-    # to leave provider defaults alone.
-    reasoning_max_raw = _env("BCOPENCODE_REASONING_MAX_TOKENS", "2048")
+    # --- reasoning budget -------------------------------------------------------
+    # Reasoning models count *thinking* against max_tokens, so an uncapped one can spend
+    # the whole completion budget before emitting any findings.
+    #
+    # This used to send `reasoning: {max_tokens: N}`. Measured against the real 40k-token
+    # packed review prompt, that is the WRONG control:
+    #
+    # Measured on the real 40k-token packed review prompt, max_tokens=16000:
+    #
+    #   model                    none                    low
+    #   ling-3.0-flash           OK, 6412 chars          TRUNCATED, 0 usable findings
+    #   nemotron-3-super-120b    OK, 5 findings          TRUNCATED, 0 findings
+    #   nemotron-3-ultra-550b    OK, 6 findings          OK, 10 findings
+    #
+    # ling ignores reasoning.max_tokens entirely (completion=16000, reasoning=14480,
+    # 1861 chars of review). `effort` it does honour — but `low` still let two of the
+    # three burn the whole budget thinking and emit NO answer, so the client fell back to
+    # scraping their reasoning stream: tens of thousands of characters, zero findings.
+    #
+    # So the default is `none`. Disabling reasoning never truncated on any model tested,
+    # and a shallower review that exists beats a deeper one that does not. `low` buys
+    # more depth on nemotron-ultra (10 findings vs 6) — set it per-model if you want that.
+    #
+    # OpenRouter refuses both controls at once:
+    # "Only one of reasoning.effort and reasoning.max_tokens can be specified."
+    #
+    #   BCOPENCODE_REASONING_EFFORT = none (default) | low | medium | high
+    #                                 none -> reasoning disabled outright (default)
+    #                                 off  -> send nothing, provider defaults
+    #   BCOPENCODE_REASONING_MAX_TOKENS   legacy; if explicitly set it wins and the
+    #                                     numeric cap is sent (0 keeps its old meaning of
+    #                                     "send nothing"). Kept so existing configs work.
+    effort = _env("BCOPENCODE_REASONING_EFFORT", "none").strip().lower()
+    legacy_raw = os.environ.get("BCOPENCODE_REASONING_MAX_TOKENS")
     body: Dict[str, Any] = {
         "model": or_id,
         "messages": messages,
@@ -247,13 +276,17 @@ def chat(
         "temperature": temperature,
         "usage": {"include": True},
     }
-    try:
-        rmax = int(reasoning_max_raw)
-    except ValueError:
-        rmax = 2048
-    if rmax > 0:
-        # OpenRouter reasoning budget (ignored by models that do not support it).
-        body["reasoning"] = {"max_tokens": min(rmax, max(256, max_tokens // 4))}
+    if legacy_raw is not None:
+        try:
+            rmax = int(legacy_raw)
+        except ValueError:
+            rmax = 2048
+        if rmax > 0:
+            body["reasoning"] = {"max_tokens": min(rmax, max(256, max_tokens // 4))}
+    elif effort in ("low", "medium", "high"):
+        body["reasoning"] = {"effort": effort}
+    elif effort == "none":
+        body["reasoning"] = {"enabled": False}
     try:
         code, text, parsed = http_json(
             "POST",

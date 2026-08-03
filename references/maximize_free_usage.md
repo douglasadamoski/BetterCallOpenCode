@@ -109,7 +109,8 @@ with `finish_reason=length`, often with little or no final `content`.
 | Knob | Default | Effect |
 |------|---------|--------|
 | `--max-tokens` / `BCOPENCODE_MAX_TOKENS` | **16384** | Room for thinking + findings |
-| `BCOPENCODE_REASONING_MAX_TOKENS` | **2048** | Caps reasoning budget via OpenRouter `reasoning.max_tokens` when supported |
+| `BCOPENCODE_REASONING_EFFORT` | **none** | `none`\|`low`\|`medium`\|`high`\|`off`. Some free models IGNORE `reasoning.max_tokens` and burn the whole completion budget thinking — measured: `ling-3.0-flash` returned 1861 chars of review out of 16000 tokens. `none` fixed it. |
+| `BCOPENCODE_REASONING_MAX_TOKENS` | *(unset)* | Legacy. If set it wins over EFFORT (OpenRouter accepts only one of the two). `0` = provider default |
 | Smaller pack / stages | — | Fewer input tokens, tighter answers |
 | Prefer Nemotron Ultra/Super free | — | Often better structured code-review answers than tiny reasoning models |
 
