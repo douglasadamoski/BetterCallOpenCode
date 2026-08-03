@@ -153,7 +153,15 @@ bash "$SKILL_DIR/scripts/multi_review.sh" \
 ```
 
 See `scripts/rate_limit.py` + `scripts/panel_run.py`. Merge reports: prefer consensus
-CRITICAL/HIGH; note disagreements.
+CRITICAL/HIGH; note disagreements. `RESULT=PARTIAL` means *some* models produced a
+review — **name which ones failed**; a merged critique missing N of M opinions is not a
+complete review.
+
+> [!NOTE]
+> **The cap is not atomic across separately launched runs.** Each run checks the ledger
+> then acts, so two runs started at the same moment can both pass a check at N-1. The
+> panel admits at most `cap - used` models up front, which covers the fan-out case; the
+> RPM limiter is likewise in-process. For a strict cap, run one review at a time.
 
 ## Mode D — Staged / short prompts (free time limits)
 

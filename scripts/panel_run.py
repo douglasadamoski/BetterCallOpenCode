@@ -19,6 +19,8 @@ import csv
 import json
 import os
 import re
+import importlib.util
+import signal
 import subprocess
 import sys
 import time
@@ -52,20 +54,65 @@ PRESETS = {
 }
 
 
+# The free gate is a money gate: it must have ONE implementation, not three. This module
+# used to carry its own copy of normalize/is_free alongside the shell and or_client ones;
+# tests/test_gate_parity.py only covered two of them, so this was the drift risk. Import
+# the authority instead.
+_or_spec = importlib.util.spec_from_file_location(
+    "or_client_for_panel", Path(__file__).resolve().parent / "or_client.py"
+)
+_or_client = importlib.util.module_from_spec(_or_spec)
+_or_spec.loader.exec_module(_or_client)
+
+
+def _cap_used_today() -> Optional[int]:
+    """Billed rows in today's ledger, or None if it cannot be read.
+
+    Mirrors bcoc_cap_used in _bcoc_common.sh. Returning None (rather than 0) on an
+    unreadable ledger matters: treating "cannot read" as "nothing used" is how a cap
+    silently becomes infinite.
+    """
+    import datetime
+
+    state = os.environ.get("BCOPENCODE_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".bettercallopencode"
+    )
+    path = os.path.join(state, "usage.jsonl")
+    if not os.path.exists(path):
+        return 0
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    not_billed = {"AUTH", "CAP", "UNREACHABLE", "QUOTA", "PAID_BLOCKED", "REFUSED", "BAD_ARGS"}
+    n = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("day") != day:
+                    continue
+                billed = o.get("billed")
+                if billed is None:
+                    billed = o.get("result") not in not_billed
+                if billed:
+                    n += 1
+    except OSError:
+        return None
+    return n
+
+
 def normalize_model(m: str) -> str:
-    """OpenCode form openrouter/<or-id>. Preserve free router id openrouter/free."""
-    m = m.strip()
-    if m in ("free", "openrouter/free", "openrouter/openrouter/free"):
-        return "openrouter/openrouter/free"
-    if m.startswith("openrouter/"):
-        return m if m.count("/") >= 1 else f"openrouter/{m}"
-    return f"openrouter/{m}"
+    oc_form, _or_id = _or_client.normalize_model(m)
+    return oc_form
 
 
 def is_free(m: str) -> bool:
-    nm = normalize_model(m)
-    mid = nm[len("openrouter/") :] if nm.startswith("openrouter/") else nm
-    return mid.endswith(":free") or mid in ("free", "openrouter/free")
+    return _or_client.is_free_model(m)
+
 
 
 def list_all_free() -> List[str]:
@@ -178,18 +225,34 @@ def run_one(
 
     print(f"[{idx}/{total}] START {model}", file=sys.stderr, flush=True)
     t0 = time.monotonic()
+    # Popen + SIGTERM, not subprocess.run(timeout=...). run() KILLS the wrapper outright,
+    # so the wrapper's TERM trap never fires: it neither records the spent request in the
+    # ledger nor prints RESULT=, and its own setsid'd client keeps running orphaned. Send
+    # TERM, give the trap time to do its job, and only escalate if it refuses to die.
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout + 60,
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-    except subprocess.TimeoutExpired as e:
-        stdout = (e.stdout or "") if isinstance(e.stdout, str) else ""
-        stderr = (e.stderr or "") if isinstance(e.stderr, str) else str(e)
+    except OSError as e:
+        stdout, stderr = "", f"failed to launch: {e}"
+    else:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout + 60)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                proc.terminate()
+            try:
+                stdout, stderr = proc.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                stdout, stderr = proc.communicate()
+            stderr = (stderr or "") + "\n[panel] wrapper timed out; sent SIGTERM to its group"
         elapsed = time.monotonic() - t0
         row = {
             "model": model,
@@ -305,6 +368,28 @@ def main() -> int:
     if not final_models:
         print("No models to run", file=sys.stderr)
         return 2
+
+    # Cap admission BEFORE dispatch. Each child re-checks the cap itself, but that check
+    # is check-then-act: in a parallel panel every worker can read `used < cap` before any
+    # of them appends a ledger row, so `--cap 1 --preset coding-panel` used to spend four
+    # requests. Admitting at most (cap - used) models up front closes the panel case, which
+    # is the one that fans out. It does NOT make the cap atomic across separately launched
+    # runs — see the note in SKILL.md; for a strict cap, run sequentially.
+    used = _cap_used_today()
+    if used is not None:
+        remaining = args.cap - used
+        if remaining <= 0:
+            print(f"CAP: {used}/{args.cap} calls today. Nothing dispatched.", file=sys.stderr)
+            print("RESULT=CAP", flush=True)
+            return 1
+        if remaining < len(final_models):
+            print(
+                f"CAP: {used}/{args.cap} used today; admitting {remaining} of "
+                f"{len(final_models)} models. Dropped: "
+                + ", ".join(m[len('openrouter/'):] for m in final_models[remaining:]),
+                file=sys.stderr,
+            )
+            final_models = final_models[:remaining]
 
     rpm = max(1, args.rpm)
     workers = args.max_workers or min(rpm, len(final_models))
@@ -445,8 +530,25 @@ def main() -> int:
 
     # stdout summary for humans
     print(json.dumps({"ok": ok_n, "truncated": trunc_n, "other": fail_n, "csv": str(csv_path), "index": str(index)}, indent=2))
-    print("RESULT=OK" if fail_n == 0 else f"RESULT=PARTIAL", flush=True)
-    return 0 if fail_n == 0 else 1
+    # PARTIAL must mean "some models produced a usable review". Returning it when ZERO
+    # did told Claude to go and triage a merged critique that does not exist, defeating
+    # "on AUTH/CAP/QUOTA: STOP". The sequential path already got this right.
+    usable = ok_n + trunc_n
+    if not results:
+        print("No models were run.", file=sys.stderr)
+        print("RESULT=BAD_ARGS", flush=True)
+        return 1
+    if usable == 0:
+        worst = next((r["result"] for r in results if r["result"] not in ("OK", "TRUNCATED")), "ERROR")
+        print(f"Every model failed (first failure: {worst}). This is NOT a review.", file=sys.stderr)
+        print(f"RESULT={worst}", flush=True)
+        return 1
+    if fail_n:
+        print(f"{usable}/{len(results)} models produced a review.", file=sys.stderr)
+        print("RESULT=PARTIAL", flush=True)
+        return 1
+    print("RESULT=OK", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

@@ -112,10 +112,26 @@ SECRET_CONTENT_RE = re.compile(
 # repo, and nobody can review the most security-critical code here. Enforced by
 # tests/test_pack_secrets.py::test_packer_does_not_refuse_its_own_source, which has now
 # caught this three times.
+# Key spellings: snake_case, camelCase and SCREAMING_CASE all appear in the wild.
+# `[_-]?` between words covers apiKey/api_key/api-key; the leading (?:[a-z0-9]+[_-])?
+# covers service_api_key / clientSecret / gitlabPrivateToken.
+# The prefix is a BOUNDED character class, deliberately not `(?:[a-z0-9]+[_-]?)*`.
+# That nested quantifier is catastrophic backtracking — on a long non-matching line the
+# match time is exponential, and it hung the entire test suite the first time it ran.
+# Any change here must keep tests/test_pack_secrets.py::test_secret_scan_is_linear green.
+_SECRET_KEY = (
+    rb"[a-z0-9_-]{0,24}"
+    rb"(?:pass(?:word|wd)?|secret|api[_-]?key|access[_-]?token|auth[_-]?token"
+    rb"|private[_-]?token|client[_-]?secret|refresh[_-]?token|session[_-]?key)"
+)
 SECRET_ASSIGN_RE = re.compile(
+    # AWS secret keys are unquoted base64-ish and long.
     rb"aws_secret_access_key[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{30,}"
-    rb"|(pass(word|wd)?|secret|api[_-]?key|access[_-]?token)"
-    rb"[\"']?\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']",
+    # Quoted value: 6+ chars is enough because the quotes bound it unambiguously.
+    rb"|" + _SECRET_KEY + rb"[\"']?\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']"
+    # UNQUOTED value: needs to be longer and to look random, or every
+    # `password: see-vault` note in a README trips it.
+    rb"|" + _SECRET_KEY + rb"\s*[:=]\s*[A-Za-z0-9_+/=.-]{16,}(?:\s|$)",
     re.I,
 )
 
@@ -145,8 +161,15 @@ def looks_secret_content(data: bytes) -> bool:
         return True
     # The assignment heuristic fires on shape alone, so each hit is checked against the
     # placeholder list. One live-looking assignment is enough to withhold the file.
+    #
+    # The check runs on the VALUE, not the whole match: a key literally named
+    # `example_api_key` or `test_token` would otherwise suppress a real credential
+    # assigned to it, because "example"/"test" appeared anywhere in the matched text.
     for m in SECRET_ASSIGN_RE.finditer(data):
-        if not PLACEHOLDER_RE.search(m.group(0)):
+        blob = m.group(0)
+        idx = max(blob.rfind(b"="), blob.rfind(b":"))
+        value = blob[idx + 1:] if idx >= 0 else blob
+        if not PLACEHOLDER_RE.search(value):
             return True
     return False
 
@@ -336,6 +359,7 @@ def iter_files(
     patterns: List[str],
     secret_sink: Optional[List[str]] = None,
     pruned_sink: Optional[List[str]] = None,
+    symlink_sink: Optional[List[str]] = None,
 ) -> Iterable[Tuple[int, Path, str]]:
     for dirpath, dirnames, filenames in os.walk(root):
         # prune dirs in-place
@@ -368,17 +392,24 @@ def iter_files(
                 continue
             if OWN_OUTPUT_RE.search(rel):
                 continue
-            if ignored(rel, patterns):
-                continue
+            # Secret classification runs BEFORE the gitignore check on purpose.
+            # `.env` is usually IN .gitignore, so checking gitignore first meant the
+            # single most important withheld file was dropped silently and never
+            # appeared in secrets_skipped_by_name — "not reviewed" was indistinguishable
+            # from "reviewed and clean" for exactly the file that matters most.
             if is_secret(full, rel):
                 if secret_sink is not None:
                     secret_sink.append(rel)
                 continue
+            if ignored(rel, patterns):
+                continue
             if is_binary_path(full):
                 continue
             if full.is_symlink():
-                # Skip symlinks entirely: name may look safe while target is a secret,
-                # and resolve() can escape the scope.
+                # Skip symlinks entirely: the name may look safe while the target is a
+                # secret, and resolve() can escape the scope. Recorded, not silent.
+                if symlink_sink is not None:
+                    symlink_sink.append(rel)
                 continue
             yield rank_file(full, rel), full, rel
 
@@ -407,8 +438,9 @@ def pack(
     patterns = load_gitignore(root)
     secrets_by_name: List[str] = []
     pruned_dirs: List[str] = []
+    symlinks: List[str] = []
     ranked = sorted(
-        iter_files(root, patterns, secrets_by_name, pruned_dirs),
+        iter_files(root, patterns, secrets_by_name, pruned_dirs, symlinks),
         key=lambda x: (-x[0], x[2]),
     )
     all_rels = [rel for _, _, rel in ranked]
@@ -500,6 +532,7 @@ def pack(
         # Whole directories never walked. Without this the meta cannot distinguish
         # "no secrets in .ssh" from "never looked at .ssh".
         "pruned_dirs": sorted(pruned_dirs),
+        "symlinks_skipped": sorted(symlinks),
         # The scope root itself sitting under a secret-looking directory is a caller
         # problem, not a per-file one — flag it instead of silently withholding
         # every file in an otherwise ordinary project.

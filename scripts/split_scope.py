@@ -3,119 +3,124 @@
 
 Usage:
   split_scope.py <scope_dir> --max-input-tokens 40000 --out-dir /tmp/chunks
-  Prints JSON list of chunk files to stdout.
+  Prints JSON with the chunk files and the withheld-file manifest.
+
+This is Mode D's packer. It deliberately owns NO filtering logic of its own: it reuses
+`pack_context`'s secret classification, gitignore handling, binary detection and directory
+pruning. It previously had its own tiny skip list (`.env*`, `*.pem`, `*.key`, `*.p12`,
+`*.pfx`) with no content scanning, no gitignore handling, no symlink defence and no
+withheld-file accounting — so the documented staged workflow bypassed every hardening the
+main packer had, and a credential in `settings.yaml`, `auth.json` or `.pgpass` would have
+shipped. One classifier, one place to fix it.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
+from typing import Dict, List
 
-# Reuse packer heuristics lightly
-SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-    ".tox", ".mypy_cache", ".pytest_cache", "target", "vendor", ".next",
-}
-SKIP_FILES = {".env", ".env.local", ".env.rc"}
-SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+_spec = importlib.util.spec_from_file_location(
+    "pack_context", Path(__file__).resolve().parent / "pack_context.py"
+)
+pack_context = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(pack_context)
 
 
 def approx_tokens(text: str) -> int:
-    # rough: 4 chars ≈ 1 token
-    return max(1, len(text) // 4)
-
-
-def should_skip(path: Path) -> bool:
-    name = path.name
-    if name in SKIP_FILES or name.startswith(".env"):
-        return True
-    if name.endswith(SECRET_SUFFIXES):
-        return True
-    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".gz", ".so", ".dll", ".bin"}:
-        return True
-    return False
-
-
-def collect_files(root: Path) -> list[Path]:
-    out: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-        for fn in filenames:
-            p = Path(dirpath) / fn
-            if should_skip(p):
-                continue
-            try:
-                if p.stat().st_size > 400_000:
-                    continue
-            except OSError:
-                continue
-            out.append(p)
-    out.sort(key=lambda p: str(p))
-    return out
+    return pack_context.est_tokens(text)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("scope")
     ap.add_argument("--max-input-tokens", type=int, default=40000)
+    ap.add_argument("--max-file-bytes", type=int, default=120000)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--chunks", type=int, default=0, help="Force max chunk count (0=auto)")
     args = ap.parse_args()
 
     root = Path(args.scope).resolve()
+    if not root.is_dir():
+        print(f"Not a directory: {root}", file=sys.stderr)
+        return 2
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    files = collect_files(root)
+    patterns = pack_context.load_gitignore(root)
+    withheld_by_name: List[str] = []
+    pruned: List[str] = []
+    ranked = sorted(
+        pack_context.iter_files(root, patterns, withheld_by_name, pruned),
+        key=lambda x: (-x[0], x[2]),
+    )
+
+    withheld_by_content: List[str] = []
+    skipped: List[Dict[str, str]] = []
     budget = max(2000, args.max_input_tokens)
-    chunks: list[list[tuple[Path, str]]] = []
-    cur: list[tuple[Path, str]] = []
+
+    chunk_files: List[Dict[str, object]] = []
+    cur: List[str] = []
     cur_tok = 0
 
-    for p in files:
+    def flush() -> None:
+        nonlocal cur, cur_tok
+        if not cur:
+            return
+        idx = len(chunk_files) + 1
+        path = out_dir / f"chunk_{idx:03d}.txt"
+        path.write_text("".join(cur), encoding="utf-8")
+        chunk_files.append({"path": str(path), "tokens_est": cur_tok, "files": len(cur)})
+        cur, cur_tok = [], 0
+
+    for _score, full, rel in ranked:
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+            raw = full.read_bytes()
+        except OSError as e:
+            skipped.append({"path": rel, "reason": str(e)})
             continue
-        t = approx_tokens(text) + 20
-        if cur and cur_tok + t > budget:
-            chunks.append(cur)
-            cur = []
-            cur_tok = 0
+        # Same content backstop as the main packer: a credential in an innocently named
+        # file must not reach a chunk either.
+        if pack_context.looks_secret_content(raw):
+            withheld_by_content.append(rel)
+            skipped.append({"path": rel, "reason": "secret-content"})
+            continue
+        if pack_context.looks_binary(raw):
+            skipped.append({"path": rel, "reason": "binary"})
+            continue
+        truncated = False
+        if len(raw) > args.max_file_bytes:
+            raw = raw[: args.max_file_bytes]
+            truncated = True
+        text = raw.decode("utf-8", errors="replace")
+        if truncated:
+            text += f"\n\n… [truncated at {args.max_file_bytes} bytes]\n"
+        block = f"## File: {rel}\n```text\n{text}\n```\n\n"
+        t = approx_tokens(block)
         if t > budget:
-            # single oversized file — truncate
             keep = budget * 4
-            text = text[:keep] + "\n\n… [truncated by split_scope.py]\n"
-            t = approx_tokens(text)
-            chunks.append([(p, text)])
-            continue
-        cur.append((p, text))
+            text = text[:keep] + "\n\n… [truncated for chunk budget]\n"
+            block = f"## File: {rel}\n```text\n{text}\n```\n\n"
+            t = approx_tokens(block)
+        if cur and cur_tok + t > budget:
+            flush()
+        cur.append(block)
         cur_tok += t
-    if cur:
-        chunks.append(cur)
+    flush()
 
-    if args.chunks and args.chunks > 0 and len(chunks) > args.chunks:
-        # merge greedily into N by rebalancing is complex; just cap by merging tail
-        while len(chunks) > args.chunks:
-            a = chunks.pop()
-            chunks[-1].extend(a)
-
-    paths = []
-    for i, chunk in enumerate(chunks):
-        body_lines = [f"# Chunk {i+1}/{len(chunks)} of {root}\n"]
-        for p, text in chunk:
-            rel = p.relative_to(root)
-            body_lines.append(f"\n=== FILE: {rel} ===\n")
-            body_lines.append(text)
-            if not text.endswith("\n"):
-                body_lines.append("\n")
-        outp = out_dir / f"chunk_{i+1:03d}.txt"
-        outp.write_text("".join(body_lines), encoding="utf-8")
-        paths.append(str(outp))
-
-    print(json.dumps({"scope": str(root), "n_chunks": len(paths), "chunks": paths, "n_files": len(files)}))
+    out = {
+        "root": str(root),
+        "chunks": chunk_files,
+        "files_seen": len(ranked),
+        "skipped": skipped[:50],
+        # Same "never silent" contract as pack_context: a withheld file must stay visible.
+        "secrets_skipped_by_name": sorted(withheld_by_name),
+        "secrets_skipped_by_content": sorted(withheld_by_content),
+        "pruned_dirs": sorted(pruned),
+    }
+    print(json.dumps(out, indent=2))
     return 0
 
 

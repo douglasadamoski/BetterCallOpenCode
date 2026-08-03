@@ -51,8 +51,11 @@ KEEP_RUN STRICT_SCAN API_KEY"
 # OPENROUTER_API_KEY (bill the whole packed codebase to an attacker's account, where
 # prompt logging can read it). Reproduced end to end. None of those are on this list,
 # and OPENROUTER_* is never accepted from a repo at all.
-_BCOC_KEYS_REPO="MODEL MAX_TOKENS MAX_INPUT_TOKENS TIMEOUT TEMPERATURE FREE_RPM \
-REASONING_MAX_TOKENS"
+# MODEL and MAX_INPUT_TOKENS are deliberately NOT here. A repo choosing the model picks
+# which third party sees its reviewer's codebase and can steer toward a weaker critic;
+# a repo raising MAX_INPUT_TOKENS decides how much of YOUR code gets uploaded. Neither is
+# a decision the reviewed project gets to make. Set them in your own config or on the CLI.
+_BCOC_KEYS_REPO="MAX_TOKENS TIMEOUT TEMPERATURE FREE_RPM REASONING_MAX_TOKENS"
 
 _bcoc_key_allowed() {  # $1=bare key (no BCOPENCODE_ prefix), $2=allowlist
   local k
@@ -95,6 +98,9 @@ _bcoc_load_one_config() {  # $1=file, $2=allowlist, $3=label
       echo "bcoc: ignoring $key from $label config ($f) — not permitted from there" >&2
       continue
     fi
+    # Accepted repo-local keys are announced, not just the refused ones: the user must be
+    # able to see every way the project under review influenced this run.
+    [[ "$label" == "repo-local" ]] && echo "bcoc: repo-local config set $key" >&2
     export "$key=$val"
   done < "$f"
 }

@@ -253,3 +253,87 @@ def test_pruned_directories_are_recorded(tmp_path):
     pruned = " ".join(meta["pruned_dirs"])
     assert ".ssh (hidden-dir)" in pruned
     assert "node_modules (skip-dir)" in pruned
+
+
+# --- Regressions from the BetterCallChatGPT review round 1 -----------------------
+
+
+def test_secret_scan_is_linear(tmp_path):
+    """The content scan must not backtrack catastrophically.
+
+    A `(?:[a-z0-9]+[_-]?)*` prefix on the assignment pattern made match time exponential
+    in the length of a NON-matching line, and hung the entire test suite on first run.
+    The scan sees every packed byte of every reviewed file, so a pathological pattern
+    here is a denial of service on the user's own machine.
+    """
+    import time
+
+    blob = b"password" + b"x" * 200_000  # the pathological shape: a near-match then noise
+    t0 = time.monotonic()
+    pack_context.looks_secret_content(blob)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5.0, f"content scan took {elapsed:.1f}s on 200 KB — likely backtracking"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _assign("service_api_key", "aVeryLongUnquotedSecret12345", quote="", sep=": "),
+        _assign("accessToken", "abcdefghij0123456789XYZ", quote="", sep=": "),
+        _assign("clientSecret", "Tr0ub4dor&3xK", sep=": "),
+        _assign("gitlabPrivateToken", "xyz1234567890abcdefgh", quote="", sep=" = "),
+        _assign("refresh_token", "1234567890abcdefghijklmn", quote="", sep="="),
+    ],
+)
+def test_camelcase_and_unquoted_assignments_are_caught(tmp_path, content):
+    """The first assignment heuristic required quoted values and only matched `api_key`."""
+    (tmp_path / "settings.yaml").write_text(content + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "settings.yaml" in meta["secrets_skipped_by_content"], f"missed: {content}"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "password: see-vault",
+        "# set your api_key in the dashboard",
+        "access_token: TODO",
+        "The client_secret is rotated quarterly.",
+    ],
+)
+def test_prose_about_credentials_is_not_withheld(tmp_path, content):
+    """Broadening the heuristic must not start withholding documentation."""
+    (tmp_path / "README.md").write_text(f"# docs\n\n{content}\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {content}"
+
+
+def test_gitignored_secret_is_recorded_not_silently_dropped(tmp_path):
+    """`.env` is almost always IN .gitignore.
+
+    The gitignore check ran BEFORE secret classification, so the single most important
+    withheld file was dropped silently and never appeared in secrets_skipped_by_name —
+    "not reviewed" was indistinguishable from "reviewed and clean" for exactly the file
+    that matters most.
+    """
+    (tmp_path / ".gitignore").write_text(".env\n*.log\n")
+    (tmp_path / ".env").write_text(f"OPENROUTER_API_KEY={FAKE_OPENROUTER}\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    body, meta = pack_context.pack(tmp_path)
+    assert FAKE_OPENROUTER not in body
+    assert ".env" in meta["secrets_skipped_by_name"], (
+        "a gitignored secret must still be REPORTED as withheld, not silently skipped"
+    )
+
+
+def test_symlink_skips_are_recorded(tmp_path):
+    """Symlinks are skipped for good reasons, but silently was not one of them."""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("secret-ish\n")
+    try:
+        (tmp_path / "link.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support symlinks")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "link.txt" in meta["symlinks_skipped"]

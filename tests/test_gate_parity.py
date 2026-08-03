@@ -28,6 +28,10 @@ or_client = importlib.util.module_from_spec(spec)
 sys.modules["or_client"] = or_client
 spec.loader.exec_module(or_client)
 
+_pspec = importlib.util.spec_from_file_location("panel_run", ROOT / "scripts" / "panel_run.py")
+panel_run = importlib.util.module_from_spec(_pspec)
+_pspec.loader.exec_module(panel_run)
+
 
 def sh_gate(model):
     """(opencode_form, is_free) as the SHELL implementation sees it."""
@@ -86,7 +90,12 @@ def test_shell_and_python_agree(model, expected_oc, expected_free):
     assert sh_oc == py_oc, f"normalize drift on {model!r}: shell={sh_oc!r} python={py_oc!r}"
     assert sh_free == py_free, f"free-gate drift on {model!r}: shell={sh_free} python={py_free}"
 
-    # And both must be right.
+    # panel_run is the THIRD implementation — it used to carry its own copy, outside
+    # this test, which is exactly how a money gate drifts.
+    assert panel_run.normalize_model(model) == py_oc, f"panel_run normalize drift on {model!r}"
+    assert panel_run.is_free(model) == py_free, f"panel_run free-gate drift on {model!r}"
+
+    # And all must be right.
     assert sh_oc == expected_oc, f"{model!r} -> {sh_oc!r}, expected {expected_oc!r}"
     assert sh_free is expected_free, f"{model!r} free={sh_free}, expected {expected_free}"
 
