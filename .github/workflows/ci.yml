@@ -31,26 +31,16 @@ jobs:
           echo "--- advisory: style and info (never blocking) ---"
           shellcheck -S style -f gcc scripts/*.sh || true
           echo "--- blocking: warnings and errors ---"
-          # Raised from -S error. Warning-class findings in this repo are things like
-          # unquoted expansions and `cd` without a guard, in scripts that handle paths
-          # from the user's project — worth failing a build over, not worth an advisory
-          # nobody reads.
+          # Raised from -S error. Warning-class findings here are things like unquoted
+          # expansions and `cd` without a guard, in scripts that handle paths from the
+          # user's project — worth failing a build over, not worth an advisory nobody
+          # reads.
           #
-          # SC2034 (variable assigned but never used) is the one exclusion, and it is
-          # structural rather than a concession: shellcheck analyses each file alone,
-          # so every variable this codebase sets for a *different* file to read trips
-          # it. scripts/_bcoc_common.sh already carries a file-level
-          # `# shellcheck disable=SC2034` for CLIENT_PY/PACK_PY/DEFAULT_*, and
-          # opencode_review.sh's BCOC_REPORT_SECRETS is the same shape (read back by
-          # tests/test_redaction.py). Excluding it keeps every OTHER warning blocking
-          # instead of keeping them all advisory.
-          #
-          # It is still printed by the advisory step above, so a genuinely dead
-          # variable stays visible in the log. Once opencode_review.sh grows its own
-          # inline `# shellcheck disable=SC2034 # read by tests/opencode_review` line,
-          # delete `--exclude=SC2034` here — the gate is clean without it apart from
-          # that single site.
-          shellcheck -S warning -f gcc --exclude=SC2034 scripts/*.sh
+          # No --exclude. The two SC2034 sites are cross-file false positives (a sourced
+          # library's vars, and one read back by tests/test_redaction.py) and each
+          # carries an inline disable naming its consumer, so the reason lives next to
+          # the code rather than in this workflow.
+          shellcheck -S warning -f gcc scripts/*.sh
 
   pytest:
     name: pytest (py${{ matrix.python-version }})
