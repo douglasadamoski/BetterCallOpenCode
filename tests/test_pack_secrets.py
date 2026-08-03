@@ -678,3 +678,30 @@ def test_mirror_applies_the_same_binary_and_size_filters_as_pack(tmp_path):
     assert "huge.txt" not in present, "an oversized file reached the mirror"
     assert "ok.py" in present
     assert set(meta["skipped_other"]) >= {"blob.dat", "huge.txt"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["change me on first login", "must contain a letter and a number",
+     "optional shared secret for the webhook", "obtain from the dashboard after signup",
+     "see the vault for details"],
+)
+def test_operator_instructions_are_not_withheld(tmp_path, value):
+    """Allowing spaces for strong keys made instructional config text look like a secret.
+
+    One line in a docker-compose.yml or Helm values file would blank the WHOLE file out
+    of the review — and "not reviewed" reads as "clean".
+    """
+    (tmp_path / "docker-compose.yml").write_text(_assign("POSTGRES_PASSWORD", value) + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert meta["secrets_skipped_by_content"] == [], f"false positive on: {value}"
+
+
+@pytest.mark.parametrize("sep", ["=", ": ", " = "])
+def test_unquoted_passphrases_are_caught_too(tmp_path, sep):
+    """Requiring quotes left half the class open: an unquoted multi-word value assigned
+    to a password key is just as much a leak."""
+    (tmp_path / "app.conf").write_text(
+        _assign("db_password", "correct horse battery staple", quote="", sep=sep) + "\n")
+    _body, meta = pack_context.pack(tmp_path)
+    assert "app.conf" in meta["secrets_skipped_by_content"]

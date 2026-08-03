@@ -75,8 +75,13 @@ def main() -> int:
         print(f"could not parse the resolved permission list: {e}", file=sys.stderr)
         return 1
 
-    # Patterns that grant everything. Anything else is a scoped exception.
-    GLOBAL = {"*", "**", "/*", "/**", ""}
+    # Patterns that grant everything. A fixed string set was brittle — `/**/*`, `**/*`
+    # and `*/*/**` are all effectively match-all and would have been dismissed as narrow,
+    # so a genuinely global allow could have been ignored. Anything made only of `*` and
+    # `/` is global; anything with a real path component is a scoped exception.
+    def _is_global(pattern):
+        pattern = str(pattern if pattern is not None else "*").strip()
+        return pattern == "" or re.fullmatch(r"[*/]+", pattern) is not None
 
     bad, narrow = [], []
     for perm in required:
@@ -86,7 +91,7 @@ def main() -> int:
                 continue
             if r.get("permission") not in (perm, "*"):
                 continue
-            if str(r.get("pattern", "*")) in GLOBAL:
+            if _is_global(r.get("pattern", "*")):
                 action = r.get("action")
             elif r.get("action") == "allow":
                 narrow.append(f"{perm} allow {r.get('pattern')}")

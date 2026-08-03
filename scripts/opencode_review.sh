@@ -467,23 +467,37 @@ fi
 # refuse to point opencode at such a repo. Writes and shell ARE blocked by the agent
 # permissions (verified end-to-end against this same hostile repo) — this gate covers
 # the one thing those permissions cannot.
-# ANY file under the scope's .opencode/ is a refusal, at any depth. The previous gate
-# was `find -maxdepth 2 \( -name '*.js' -o -name '*.ts' -o -name '*.mjs' \)`, which a
-# malicious repo walks straight past with `.opencode/plugin/nested/evil.js` (depth 3),
-# `.opencode/plugin/evil.cjs`, `.mts`, `.cts`, or a `plugins/` (plural) directory. Since
-# NO flag stops opencode importing a project plugin, extension whack-a-mole is the wrong
-# shape of defence: refuse the whole directory and be done.
+# Executable plugin code under the scope's .opencode/, at ANY depth.
+#
+# RE-MEASURED on opencode 1.18.11 after the sanitized mirror landed, because a gate whose
+# necessity is assumed rather than tested is how over-refusal creeps in:
+#
+#   opencode run --dir <hostile raw repo>   -> plugin EXECUTED
+#   opencode run --dir <filtered mirror>    -> blocked
+#
+# The mirror is what actually protects: it prunes hidden directories, so `.opencode` never
+# reaches the tree the agent runs against. This gate is therefore DEFENCE IN DEPTH, not the
+# primary control — it catches a future code path that forgets the mirror.
+#
+# Because it is no longer the primary control, it is scoped to executable extensions rather
+# than "any file under .opencode". Refusing every non-empty .opencode/ also refused ordinary
+# OpenCode projects that merely ship `.opencode/agents/*.md`, which is a large false-positive
+# blast radius for no measured gain. Depth is unbounded — `plugin/nested/evil.js`, `.cjs`,
+# `.mts` and a plural `plugins/` all walked past the original -maxdepth 2 + 3-extension gate.
 if [[ -d "$PRIMARY/.opencode" ]]; then
-  _oc_entries="$(find "$PRIMARY/.opencode" -mindepth 1 2>/dev/null | head -20)"
+  _oc_entries="$(find "$PRIMARY/.opencode" -type f \
+      \( -name '*.js' -o -name '*.cjs' -o -name '*.mjs' -o -name '*.jsx' \
+         -o -name '*.ts' -o -name '*.mts' -o -name '*.cts' -o -name '*.tsx' \
+         -o -name '*.wasm' -o -name '*.node' \) 2>/dev/null | head -20)"
   if [[ -n "$_oc_entries" ]]; then
     {
-      echo "REFUSED: the scope ships an .opencode/ directory:"
+      echo "REFUSED: the scope ships executable code under .opencode/:"
       printf '  %s\n' $_oc_entries
       echo
       echo "opencode imports and RUNS project plugins before any agent, permission or model"
-      echo "exists. Neither --pure nor OPENCODE_DISABLE_PROJECT_CONFIG=1 prevents this in a"
-      echo "real 'opencode run' session — measured on opencode $(opencode --version 2>/dev/null || echo '?')."
-      echo "Reviewing this repo with --backend opencode would execute its code on your machine."
+      echo "exists, and no flag prevents it. This skill reviews through a filtered mirror that"
+      echo "excludes .opencode entirely, so this is a belt-and-braces refusal — but a repo that"
+      echo "ships plugin code is not one to point an agent at."
       echo
       echo "Use --backend or-api instead: it never runs the repo, it only reads text."
     } >&2

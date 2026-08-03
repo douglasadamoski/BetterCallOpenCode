@@ -108,12 +108,9 @@ def test_review_script_refuses_repos_with_opencode_plugins():
     """
     src = (ROOT / "scripts" / "opencode_review.sh").read_text()
     assert "_oc_entries" in src, "the .opencode scope-scan is missing"
-    assert 'find "$PRIMARY/.opencode" -mindepth 1' in src, (
-        "the scan must cover the WHOLE .opencode tree. An extension+maxdepth filter was "
-        "walked past by .opencode/plugin/nested/evil.js, evil.cjs, evil.mts and plugins/."
-    )
-    scan = src[src.index('find "$PRIMARY/.opencode"'):][:200]
-    assert "-maxdepth" not in scan, "depth-limited .opencode scanning is bypassable"
+    assert 'find "$PRIMARY/.opencode"' in src
+    # Depth and extension coverage are asserted in
+    # test_plugin_gate_is_depth_unbounded_but_extension_scoped.
 
 
 # --- Regressions from the BetterCallGemini review round 1 ------------------------
@@ -133,9 +130,8 @@ def _agent_list(mode="all", edit="deny", bash="deny", webfetch="deny", task="den
     return f"bcoc-review ({mode})\n  {json.dumps(rules, indent=2)}\n"
 
 
-def _verify(dump):
-    p = subprocess.run([sys.executable, str(VERIFY), "bcoc-review",
-                        "edit", "bash", "webfetch", "task"],
+def _verify(dump, perms=("edit", "bash", "webfetch", "task")):
+    p = subprocess.run([sys.executable, str(VERIFY), "bcoc-review", *perms],
                        input=dump, capture_output=True, text=True, timeout=60)
     return p.returncode, p.stderr
 
@@ -228,3 +224,61 @@ def test_prompt_never_names_the_real_scope_path():
     backend = src[src.index("# ---- backend opencode"):]
     assert "printf 'Scope root: %s\\n' \"$PRIMARY\"" not in backend
     assert "filtered copy" in backend
+
+
+# --- Regressions from the BetterCallGrok review round 2 --------------------------
+
+import json as _json
+
+
+def test_scoped_allow_after_a_global_deny_is_not_a_grant():
+    """opencode ALWAYS appends `external_directory allow <tool-output>/*` after the denies.
+
+    Taking the last rule regardless of pattern read that as a global grant and refused
+    every single run. A path-scoped exception is not a global grant.
+    """
+    rules = [
+        {"permission": "edit", "action": "deny", "pattern": "*"},
+        {"permission": "bash", "action": "deny", "pattern": "*"},
+        {"permission": "webfetch", "action": "deny", "pattern": "*"},
+        {"permission": "task", "action": "deny", "pattern": "*"},
+        {"permission": "external_directory", "action": "deny", "pattern": "*"},
+        {"permission": "external_directory", "action": "allow",
+         "pattern": "/home/u/.local/share/opencode/tool-output/*"},
+    ]
+    rc, err = _verify(f"bcoc-review (all)\n  {_json.dumps(rules)}\n",
+                      perms=("edit", "bash", "webfetch", "task", "external_directory"))
+    assert rc == 0, f"a scoped exception must not flip the verdict: {err}"
+    assert "scoped allow rules present" in err, "scoped allows must still be reported"
+
+
+@pytest.mark.parametrize("pattern", ["*", "**", "/*", "/**", "/**/*", "**/*", "*/*/**"])
+def test_any_all_wildcard_pattern_counts_as_global(pattern):
+    """A fixed string set of "global" patterns was brittle.
+
+    `/**/*` and `**/*` are effectively match-all; dismissing them as narrow would let a
+    genuinely global allow be ignored.
+    """
+    rules = [
+        {"permission": p, "action": "deny", "pattern": "*"}
+        for p in ("edit", "bash", "webfetch", "task", "external_directory")
+    ]
+    rules.append({"permission": "edit", "action": "allow", "pattern": pattern})
+    rc, err = _verify(f"bcoc-review (all)\n  {_json.dumps(rules)}\n",
+                      perms=("edit", "bash", "webfetch", "task", "external_directory"))
+    assert rc == 1, f"pattern {pattern!r} should count as a global grant"
+    assert "edit=allow" in err
+
+
+def test_plugin_gate_is_depth_unbounded_but_extension_scoped():
+    """Re-measured: the MIRROR is what blocks plugin RCE (raw --dir fires, mirror does not).
+
+    So this gate is defence in depth, and refusing every non-empty `.opencode/` broke
+    ordinary OpenCode projects that merely ship `.opencode/agents/*.md` for no measured
+    gain. Depth stays unbounded — that is what the original gate got wrong.
+    """
+    src = (ROOT / "scripts" / "opencode_review.sh").read_text()
+    scan = src[src.index('find "$PRIMARY/.opencode"'):][:400]
+    assert "-maxdepth" not in scan, "depth-limited scanning is bypassable"
+    for ext in ("*.js", "*.cjs", "*.mjs", "*.ts", "*.mts", "*.cts", "*.wasm"):
+        assert ext in scan, f"{ext} plugins would slip past the gate"

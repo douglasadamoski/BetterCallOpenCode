@@ -202,11 +202,27 @@ def _trim_value(v: bytes) -> bytes:
 # than written out, per this file's no-literal-matches invariant.)
 _STRONG_KEY_RE = re.compile(rb"pass(?:word|wd)?|secret|api[_-]?key|private[_-]?key", re.I)
 
+# A multi-word value assigned to a password key is genuinely ambiguous: a diceware
+# passphrase and an instruction to the operator have the SAME shape (letters and spaces).
+# Nothing distinguishes them structurally, so this matches how instructions actually read.
+# Everything else multi-word is treated as a secret — the failure that matters is packing a
+# real passphrase, not withholding one config line.
+_INSTRUCTIONAL_RE = re.compile(
+    rb"change[ _-]?me|must (?:contain|be|have)|obtain (?:from|via)|leave (?:blank|empty)"
+    rb"|see (?:the )?(?:vault|docs|readme|above|below)|ask (?:your|the)|contact "
+    rb"|your (?:password|secret|key|token)|optional|generated|will be|set (?:this|it)"
+    rb"|replace (?:this|with)|if (?:you|not)|e\.g\.|for example|after (?:signup|install)"
+    rb"|on first (?:login|run|boot)|not (?:set|used|required)|n/a",
+    re.I,
+)
+
 
 def _value_is_credential_like(v: bytes, key: bytes = b"") -> bool:
     """Does this right-hand side look like a literal secret, rather than a reference?"""
-    was_quoted = v.strip()[:1] in (b'"', b"'")
-    allow_spaces = was_quoted and _STRONG_KEY_RE.search(key or b"") is not None
+    # Quoting is NOT required. An unquoted multi-word value assigned to a password key is
+    # just as much a leak as the quoted form, and requiring quotes left half the class
+    # open. (Described rather than written out, per this file's no-literal-matches rule.)
+    allow_spaces = _STRONG_KEY_RE.search(key or b"") is not None
     v = _trim_value(v)
     # Backticks are stripped because prose quotes code in markdown spans, and trailing
     # sentence/structure punctuation is not part of the value.
@@ -227,10 +243,21 @@ def _value_is_credential_like(v: bytes, key: bytes = b"") -> bool:
         return False
     if b"\t" in v:
         return False
-    if b" " in v and not allow_spaces:
-        return False          # prose, not a token
-    if b" " in v and len(v) < 12:
-        return False          # too short to be a passphrase
+    if b" " in v:
+        if not allow_spaces or len(v) < 12:
+            return False      # prose, or too short to be a passphrase
+        if _INSTRUCTIONAL_RE.search(v):
+            return False      # an instruction to the operator, not a credential
+        # A type annotation is not a passphrase. `def f(api_key: str) -> Dict[str, str]:`
+        # matches the strong key with a spaced "value", and withheld two of this repo's
+        # own source files. Two structural tells: a return arrow, and a closing bracket
+        # that appears before any opening one (we matched inside a parameter list).
+        if b"->" in v:
+            return False
+        opener = min((i for i in (v.find(b"("), v.find(b"[")) if i >= 0), default=len(v))
+        closer = min((i for i in (v.find(b")"), v.find(b"]")) if i >= 0), default=len(v))
+        if closer < opener:
+            return False
     txt = v.decode("utf-8", errors="replace")
     classes = sum(
         (
