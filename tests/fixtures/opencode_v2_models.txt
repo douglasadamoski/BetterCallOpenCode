@@ -1,0 +1,6 @@
+opencode/big-pickle
+opencode/nemotron-3-ultra-free
+provider-a/model-one
+provider-a/model-two
+openrouter/nvidia/nemotron-3-super-120b-a12b:free
+openrouter/some-vendor/paid-model

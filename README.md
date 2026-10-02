@@ -192,6 +192,24 @@ Preflight costs nothing and needs no prompt:
 bash scripts/opencode_review.sh --preflight --scope .
 ```
 
+Learn which providers and models you have, then pick (any provider connected to OpenCode,
+not just OpenRouter — see [providers & capabilities](references/providers_and_capabilities.md)):
+
+```bash
+python3 scripts/discover_providers.py                          # ~1 s; re-probes only what changed
+python3 scripts/select_models.py --task research --list        # ranked table
+python3 scripts/select_models.py --task research --n 3 --auto  # or let it decide
+```
+
+Use a model as a **worker** — one task in, one result file out. Run several in parallel
+(the `bcoc-delegate` agent wraps this) to put part of a deep-research or panel workflow on
+OpenRouter or another provider:
+
+```bash
+python3 scripts/delegate.py --role researcher --model auto \
+  --prompt-file task.md --out result.md --fallback auto
+```
+
 Multi-model panel, parallel under the free 20 RPM limit:
 
 ```bash
@@ -235,7 +253,13 @@ scripts/verify_agent_permissions.py # parses `opencode agent list`; refuses if n
 scripts/run_local.sh                # Claude runs an APPROVED, critic-proposed script
 scripts/opencode_usage.sh           # ledger summary
 scripts/list_free_models.py         # live :free roster
+scripts/discover_providers.py       # providers/models/capabilities -> capabilities.json cache
+scripts/select_models.py            # rank / pick models for a task from that cache
+scripts/delegate.py                 # run one task on any provider's model as a worker
+scripts/ledger.py                   # ledger + shared RPM window for Python callers
 agents/bcoc-review.md               # the OpenCode critic agent (mode: all + deny blocks)
+agents/bcoc-research.md             # opencode 1.x researcher agent (web allowed, no edit/shell)
+agents/bcoc-delegate.md             # Claude Code subagent: dispatches one delegate.py call
 opencode-config/                    # OPENCODE_CONFIG_DIR the skill points opencode at
 templates/                          # critique / experiment / chunk prompts
 references/                         # free models, verified OpenCode notes, maximize free
@@ -304,7 +328,8 @@ is ignored, loudly, because the repo being reviewed does not get to configure it
 ## Docs
 
 - [OpenRouter free models & limits](references/openrouter_free_models.md)
-- [OpenCode CLI notes](references/opencode_notes.md) — verified flags and live experiments
+- [Providers & capabilities](references/providers_and_capabilities.md) — discovery, cache, zero-cost policy, model choice
+- [OpenCode CLI notes](references/opencode_notes.md) — verified flags and live experiments (1.x and 2.x)
 - [Maximize free usage](references/maximize_free_usage.md)
 - [Full free-models guide](references/OPENROUTER_FREE_MODELS_GUIDE.md)
 - [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)

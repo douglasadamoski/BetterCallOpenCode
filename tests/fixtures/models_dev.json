@@ -1,0 +1,8 @@
+{"opencode": {"models": {
+  "big-pickle": {"name": "Big Pickle", "limit": {"context": 200000, "output": 32000},
+                 "tool_call": true, "reasoning": true, "modalities": {"input": ["text"]},
+                 "cost": {"input": 0, "output": 0}},
+  "nemotron-3-ultra-free": {"name": "Nemotron Ultra", "limit": {"context": 1000000, "output": 64000},
+                 "tool_call": true, "reasoning": true, "modalities": {"input": ["text", "image"]},
+                 "cost": {"input": 0, "output": 0}}}},
+ "provider-a": {"models": {"model-one": {"name": "One", "limit": {"context": 64000, "output": 8000}}}}}

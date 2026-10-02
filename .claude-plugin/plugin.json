@@ -1,11 +1,25 @@
 {
   "name": "better-call-opencode",
   "displayName": "BetterCallOpenCode",
-  "version": "1.0.0",
-  "description": "Delegate an independent, critical code review to free OpenRouter models via OpenCode (or direct OpenRouter API); Claude triages and implements. Free-only by default; multi-model and staged reviews supported.",
-  "author": { "name": "Douglas Adamoski", "url": "https://github.com/douglasadamoski" },
+  "version": "1.1.0",
+  "description": "Delegate code reviews and research tasks to free OpenRouter models (or any provider connected to OpenCode) as independent workers; Claude triages and implements. Free-only by default; provider discovery, capability cache and parallel delegated subagents.",
+  "author": {
+    "name": "Douglas Adamoski",
+    "url": "https://github.com/douglasadamoski"
+  },
   "homepage": "https://github.com/douglasadamoski/BetterCallOpenCode",
   "repository": "https://github.com/douglasadamoski/BetterCallOpenCode",
   "license": "GPL-3.0",
-  "keywords": ["code-review", "opencode", "openrouter", "free-models", "nemotron", "claude-code", "skill"]
+  "keywords": [
+    "code-review",
+    "opencode",
+    "openrouter",
+    "free-models",
+    "nemotron",
+    "claude-code",
+    "skill",
+    "subagents",
+    "multi-provider",
+    "deep-research"
+  ]
 }

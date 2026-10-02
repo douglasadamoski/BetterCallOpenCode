@@ -50,3 +50,6 @@ tests/fixtures/live_*
 .DS_Store
 Thumbs.db
 *~
+
+# Session archives (full transcripts — never push)
+session_archive/

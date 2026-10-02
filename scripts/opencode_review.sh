@@ -674,6 +674,12 @@ if [[ "$SANDBOX_VERIFIED" != "yes" ]]; then
   echo "REFUSED: could not verify the write/shell deny rules resolved for agent '$AGENT_NAME'." >&2
   echo "  Check: OPENCODE_CONFIG_DIR=\"$OPENCODE_CONFIG_DIR\" opencode agent list" >&2
   echo "  The agent must report mode 'all' (not 'subagent') and trailing deny rules." >&2
+  _ocv="$(opencode --version 2>/dev/null || true)"
+  if [[ "$_ocv" =~ ^v?([0-9]+)\. ]] && (( BASH_REMATCH[1] >= 2 )); then
+    echo "  opencode $_ocv (2.x) has no \`agent list\` and ignores OPENCODE_CONFIG_DIR for agents, so this" >&2
+    echo "  review path cannot verify its agent. Use --backend or-api, or scripts/delegate.py --backend opencode" >&2
+    echo "  (researcher role). See references/opencode_notes.md, 'opencode 2.x'." >&2
+  fi
   cat "$RUN_DIR/perm.err" >&2 2>/dev/null || true
   record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
   echo "RESULT=REFUSED"

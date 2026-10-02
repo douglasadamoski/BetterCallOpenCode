@@ -8,6 +8,82 @@ The **RESULT contract** — the last stdout line of every entrypoint — is the 
 this skill. Adding a word to it, or changing what an existing word means, is a breaking
 change.
 
+## [1.1.0] — 2026-10-02
+
+Adds provider discovery, a capability cache, model selection and delegated workers. The
+`RESULT=` vocabulary is unchanged; `delegate.py` reuses it.
+
+### Added
+
+- `scripts/discover_providers.py` — asks opencode which providers/models are connected, then
+  the provider's `/models` and the public models.dev catalog what each can do; saves
+  `capabilities.json` (0600, no credentials). A ~1 s fingerprint check on every call
+  re-probes only what changed. Provider-agnostic: nothing is specific to one vendor.
+- Per-provider zero-cost policy (`--set-policy`) for providers that publish no pricing.
+  Unknown cost is blocked, not assumed free.
+- `scripts/select_models.py` — ranked `--list` for the user to choose from, deterministic
+  diverse `--auto` when nobody is there to ask. Tasks: review, research, code, fast, vision.
+- `scripts/delegate.py` + `agents/bcoc-delegate.md` — run one task on any chosen model as a
+  worker, so a deep-research or panel workflow can put some agents on OpenRouter/other
+  providers. Roles `researcher|analyst|reviewer|coder-readonly`; `or-api` and `opencode`
+  backends; fallback chain that never crosses the cost gate; JSON mode; vision; PDF-as-text;
+  multi-turn sessions; a request budget shared across parallel workers.
+- `scripts/ledger.py` — the ledger and the shared RPM window for Python callers, written in
+  the exact row shape `_bcoc_common.sh` reads (a test asserts the shell counts these rows).
+- `agents/bcoc-research.md` (opencode 1.x researcher agent), `references/providers_and_capabilities.md`.
+- SKILL.md: provider/model step and Mode E (delegate), with a deep-research recipe.
+
+### Changed
+
+- `or_client.chat` accepts `base_url` and `extra_body`. For a non-OpenRouter base URL it
+  does not send the OpenRouter-only `usage`/`reasoning` fields and does not apply the
+  `:free` name test; the caller owns the cost gate.
+- `references/OPENROUTER_FREE_MODELS_GUIDE.md` merged with the verified parts of a newer
+  agent-to-agent draft. The draft's invented commands, config schema, env vars and retired
+  model ids were **not** carried over; the guide lists what was dropped and why.
+
+### Found while doing it
+
+- **opencode 2.x is a different CLI** (no `providers`, `agent list`, `--dir`, `--pure`;
+  `OPENCODE_CONFIG_DIR` ignored for agents). The existing agentic review backend already
+  fails closed there (`RESULT=REFUSED`, nothing spent) — verified — but **is not ported**:
+  see `references/opencode_notes.md`, "opencode 2.x". `delegate.py --backend opencode` uses
+  the built-in `explore` agent after verifying its resolved permissions.
+- A non-interactive `opencode run` auto-rejects `ask` permissions (measured, 2.0.22).
+- Ninth catch for `test_packer_does_not_refuse_its_own_source`: two new test files carried
+  literal token shapes and were withheld from review. Tokens in tests are now assembled.
+- `--session ""` was silently treated as "no session" (caught by a test).
+
+### Hardened after an adversarial review of the above (before release)
+
+- opencode probes (discovery, agent verification) run from an **empty directory with project
+  config disabled**, and the agent check uses the same cwd/env as the real run. Previously a
+  repository in the caller's cwd could choose the base URL and env-var name a credential is
+  sent to, or make the permission check pass for a different config than the run used.
+- Base URLs must be `https` (plain `http` only to localhost) before any credential is sent.
+- opencode children get a minimal environment plus **only that provider's** credential variable.
+- `verify_v2` also refuses a **scoped allow** of `bash`/`edit`/`subagent` (`bash allow "git *"`
+  is code execution) and a default (`*`) that grants.
+- A provider's zero-cost policy covers only the models that existed when it was set; a model
+  added later is `unknown` again. Any non-zero price field (request, image, web search) makes
+  a model `paid`, not just prompt/completion.
+- Session files are stored redacted; a model change between turns is announced.
+- A blocked fallback no longer overwrites the primary's real outcome; an unwritable ledger
+  stops further spend; invalid UTF-8 in the ledger no longer breaks the cap reader;
+  malformed opencode config / numeric env values no longer crash; `--agent` is validated and
+  `pdftotext` gets `--`.
+- Measured: a directory opencode has not seen answers empty on its first call (`models`,
+  `debug agents`), so probes use a stable directory and retry once.
+- **Known and unchanged:** the cap is still check-then-act across separately launched
+  processes, so N parallel workers can overshoot it by up to N−1 (see the Quota note in
+  README). Keep `--cap` well under the provider's real limit.
+
+### Not verified
+
+- No live OpenRouter request was made for this release (no key on the build host); OpenRouter
+  request/response shapes are covered by fixtures and a stubbed transport. The
+  `opencode` backend was verified live against one connected provider on 2.0.22.
+
 ## [1.0.0] — 2026-08-03
 
 First release considered fit to publish. The skill worked from the first commit; almost

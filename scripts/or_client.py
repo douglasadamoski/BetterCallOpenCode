@@ -226,9 +226,20 @@ def chat(
     temperature: float = 0.2,
     timeout: int = DEFAULT_TIMEOUT,
     allow_paid: bool = False,
+    base_url: Optional[str] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    oc_form, or_id = normalize_model(model)
-    free = is_free_model(model)
+    # `base_url` points the same client at any OpenAI-compatible provider. For anything
+    # other than OpenRouter the `:free` name test means nothing, so the CALLER owns the
+    # cost gate (delegate.py gates on the discovered cost class) and the OpenRouter-only
+    # request fields (`usage`, `reasoning`) are not sent — other gateways may reject them.
+    compat = bool(base_url) and base_url.rstrip("/") != OPENROUTER_BASE
+    endpoint = (base_url or OPENROUTER_BASE).rstrip("/")
+    if compat:
+        oc_form, or_id, free = model, model, True
+    else:
+        oc_form, or_id = normalize_model(model)
+        free = is_free_model(model)
     if not free and not allow_paid:
         return "PAID_BLOCKED", {
             "error": f"Model {or_id!r} is not a free variant (:free). Pass --allow-paid only after explicit user consent.",
@@ -274,9 +285,14 @@ def chat(
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "usage": {"include": True},
     }
-    if legacy_raw is not None:
+    if not compat:
+        body["usage"] = {"include": True}
+    if extra_body:
+        body.update(extra_body)
+    if compat:
+        pass
+    elif legacy_raw is not None:
         try:
             rmax = int(legacy_raw)
         except ValueError:
@@ -288,7 +304,7 @@ def chat(
     elif effort == "none":
         body["reasoning"] = {"enabled": False}
     def _post(b):
-        return http_json("POST", f"{OPENROUTER_BASE}/chat/completions",
+        return http_json("POST", f"{endpoint}/chat/completions",
                          auth_headers(api_key), b, timeout)
 
     reasoning_forced = False

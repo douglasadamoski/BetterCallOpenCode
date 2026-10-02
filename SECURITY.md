@@ -156,6 +156,35 @@ stated here because an unstated assumption is indistinguishable from an oversigh
   from OpenCode's `auth.json`, or from a user-owned config file, and it is sent to
   OpenRouter in an `Authorization` header. Rotate it if any of those are exposed.
 
+### 7. Providers, delegated workers and the capability cache (v1.1)
+
+- **Discovery makes outbound requests.** `discover_providers.py` calls each provider's own
+  `GET /models` (with that provider's credential, in an `Authorization` header, to the base
+  URL opencode's config names) and fetches the public `https://models.dev/api.json`
+  catalog (no credential). A base URL in *your own* opencode config is trusted as much as
+  that config; the reviewed project's config is not read (`OPENCODE_DISABLE_PROJECT_CONFIG=1`).
+- **The capability cache holds no credential.** `capabilities.json` is `0600` in the `0700`
+  state directory and contains model metadata only. Session files for multi-turn delegation
+  (`sessions/*.json`, `0600`) contain the **conversation text** you sent and received —
+  treat them like the reports.
+- **`delegate.py` is a worker, not a sandbox.** The `or-api` backend sends exactly the text
+  it builds (the task, the packed scope through the same secret filter, any `--pdf` text
+  through the redactor) and has no tools. Attachments you name explicitly (`--image`,
+  `--pdf`) are your choice and are **not** subject to the packer's secret filter; PDF text
+  is redacted, images are not inspected.
+- **The `researcher` role may reach the web** on the `opencode` backend (`webfetch`,
+  `websearch`). Everything it reads from the web is untrusted data; a hostile page can try
+  to steer it. It still cannot edit, run shell or leave the mirror, and its output is
+  scanned for credential shapes like every other report — but it can send *what it was
+  given* to a URL it fetches. Do not put material in a researcher's prompt or scope that
+  must not leave your machine.
+- **The money gate is data-driven.** For providers that publish no pricing, "zero-cost" is
+  whatever you told `--set-policy`. A wrong answer there removes the gate for that provider.
+  `--allow-paid` still exists only for explicit consent.
+- **opencode 2.x.** Agent restrictions are verified from `opencode debug agents` before
+  every run; the check relies on non-interactive `ask` being auto-rejected, which is
+  measured behaviour of a specific version, not a vendor guarantee (`opencode_notes.md`).
+
 ## Out of scope
 
 - OpenRouter's or its upstream providers' handling of the code you send them. Read their

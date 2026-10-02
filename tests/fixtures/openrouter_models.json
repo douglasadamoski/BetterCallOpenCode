@@ -1,0 +1,11 @@
+{"data": [
+ {"id": "nvidia/nemotron-3-super-120b-a12b:free", "name": "Nemotron Super", "context_length": 262144,
+  "pricing": {"prompt": "0", "completion": "0"},
+  "supported_parameters": ["tools", "reasoning", "response_format"],
+  "architecture": {"modality": "text->text", "input_modalities": ["text"]},
+  "top_provider": {"max_completion_tokens": 32768}},
+ {"id": "some-vendor/paid-model", "name": "Paid", "context_length": 128000,
+  "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+  "supported_parameters": ["tools"],
+  "architecture": {"input_modalities": ["text", "image"]}}
+]}

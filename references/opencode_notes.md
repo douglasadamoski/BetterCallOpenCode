@@ -256,3 +256,51 @@ happens when a measurement is taken with the wrong command. Re-run it after an u
 
 Use `--backend or-api` if the local-persistence item matters. Nothing here removes the
 last item: both backends send your code to OpenRouter.
+
+## opencode 2.x (measured on 2.0.22, 2026-10-02)
+
+Everything above was measured on 1.18.x. 2.x is a different CLI, and the old gate **cannot**
+work on it — so the original agentic review path refuses (`RESULT=REFUSED`, nothing spent)
+rather than run ungated.
+
+| Was (1.x) | Is (2.x) |
+|---|---|
+| `opencode providers login/list` | `opencode auth login/list/logout/export/import/switch` |
+| `opencode agent list` (text) | `opencode debug agents` (JSON) |
+| `opencode models <provider> --verbose` | `opencode models` (plain `provider/model` lines) |
+| `opencode run --dir D --pure` | **no `--dir`, no `--pure`** — the working directory is the project |
+| `OPENCODE_CONFIG_DIR` loads extra agents | **ignored** by agent discovery: a private agent file is never loaded, so `bcoc-review` is "not found" |
+| `--format default\|json` | same; `json` emits one event per line (`text`, `tool_use`, `step_finish`) |
+
+`opencode` also runs a background service on first use. The first call can return an empty
+`models` list while it comes up.
+
+### What `delegate.py --backend opencode` does on 2.x
+
+2.x gives a way to gate that does not need a private agent file: the **built-in** agents are
+listed with their fully resolved permissions by `opencode debug agents`. The script runs
+`opencode run --agent explore`, and only after checking that `edit`, `bash`, `subagent` and
+`external_directory` do not resolve to `allow` (last global match wins; a scoped allow does
+not flip the verdict). The cwd is a filtered mirror of `--scope` (`pack_context.py
+--mirror-to`), never the raw tree.
+
+Measured, same version:
+
+- `--agent explore` is honoured although it is mode `subagent` (the session row records
+  `agent=explore`; in 1.x a subagent silently fell back to the permissive `build` agent).
+  The script still looks for that fallback message in stderr and reports `ERROR` if it
+  appears.
+- `explore` resolves `* deny *` then allows only `read/grep/glob/webfetch/websearch`. So it
+  fits the **researcher** role. For `analyst`/`reviewer`/`coder-readonly`, which must not
+  have web tools, the check fails and the run is refused: use the `or-api` backend.
+- `ask` is treated as blocked, because a non-interactive `opencode run` without `--auto`
+  auto-rejects every `ask` (`This non-interactive run cannot ask the user for permission, so
+  the request was rejected`). Probe: reading `/etc/hostname` from the mirror returned
+  `external_directory (/etc/*); auto-rejecting`. **The skill never passes `--auto`.**
+- A session started this way is persisted by opencode in its own database, like every
+  opencode session — same limit as the 1.x "Still not covered" list.
+
+The 1.x path (`bcoc-review` / `bcoc-research` agent files + `opencode agent list` +
+`verify_agent_permissions.py`) is kept for 1.x installs and is exercised in the test suite
+only against a stub `opencode`; it was not re-measured on a real 1.x binary for this
+release.
