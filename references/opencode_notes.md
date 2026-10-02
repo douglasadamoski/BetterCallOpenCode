@@ -259,48 +259,62 @@ last item: both backends send your code to OpenRouter.
 
 ## opencode 2.x (measured on 2.0.22, 2026-10-02)
 
-Everything above was measured on 1.18.x. 2.x is a different CLI, and the old gate **cannot**
-work on it — so the original agentic review path refuses (`RESULT=REFUSED`, nothing spent)
-rather than run ungated.
+Everything above was measured on 1.18.x. 2.x is a different CLI and the 1.x gate cannot work
+on it, so the skill has a separate 2.x path (`scripts/opencode_v2.py`, used by both
+`opencode_review.sh --backend opencode` and `delegate.py --backend opencode`).
 
 | Was (1.x) | Is (2.x) |
 |---|---|
 | `opencode providers login/list` | `opencode auth login/list/logout/export/import/switch` |
-| `opencode agent list` (text) | `opencode debug agents` (JSON) |
+| `opencode agent list` (text) | `opencode debug agents` (JSON: `permissions: [{action, resource, effect}]`) |
 | `opencode models <provider> --verbose` | `opencode models` (plain `provider/model` lines) |
 | `opencode run --dir D --pure` | **no `--dir`, no `--pure`** — the working directory is the project |
-| `OPENCODE_CONFIG_DIR` loads extra agents | **ignored** by agent discovery: a private agent file is never loaded, so `bcoc-review` is "not found" |
+| `OPENCODE_CONFIG_DIR` loads extra agents | **ignored** for agent discovery |
+| bash permission is `bash` | the resolved action is named **`shell`** (a config `bash:` key is folded into it) |
 | `--format default\|json` | same; `json` emits one event per line (`text`, `tool_use`, `step_finish`) |
 
-`opencode` also runs a background service on first use. The first call can return an empty
-`models` list while it comes up.
+What 2.x *does* do: it reads **project config from the working directory** — `opencode.json`
+(an `agent` map, same schema idea as 1.x) and `.opencode/agents/*.md` both define agents — and
+`opencode debug agents` reports each agent's fully resolved permissions for that directory.
+That is what makes a verifiable restriction possible again:
 
-### What `delegate.py --backend opencode` does on 2.x
-
-2.x gives a way to gate that does not need a private agent file: the **built-in** agents are
-listed with their fully resolved permissions by `opencode debug agents`. The script runs
-`opencode run --agent explore`, and only after checking that `edit`, `bash`, `subagent` and
-`external_directory` do not resolve to `allow` (last global match wins; a scoped allow does
-not flip the verdict). The cwd is a filtered mirror of `--scope` (`pack_context.py
---mirror-to`), never the raw tree.
+1. The agent runs in the **filtered mirror** (hidden dirs pruned, secrets withheld).
+2. `opencode_v2.py prepare` renames any root-level `opencode.json`, `opencode.jsonc`,
+   `AGENTS.md`, `CLAUDE.md` (…) the reviewed repo shipped to `*.reviewed` — they would
+   otherwise configure the run (a `plugin` entry is code execution) or inject standing
+   instructions — and writes **this skill's** `opencode.json`.
+3. Its agent is `mode: primary` (so `run --agent` honours it) with a **default-deny
+   allowlist**, in this order, because the last match wins: `"*": "deny"`, then
+   `read` (`*.env`/`*.env.*` denied), `grep`, `glob`, `list`, plus `webfetch`/`websearch` for the
+   researcher role only.
+4. `opencode_v2.py verify` runs `opencode debug agents` **in that same directory with the same
+   environment the run will use** (project config is deliberately *not* disabled — the mirror's
+   config is ours) and refuses unless `edit`, `shell`/`bash`, `subagent`, `external_directory`
+   (and, for non-researchers, `webfetch`/`websearch`) resolve to deny/ask, the default `*` is not
+   a grant, and no scoped `allow` exists for `shell`/`bash`/`edit`/`subagent`.
+5. The run is `opencode run --agent bcoc-<role> --format json -f <prompt>` from inside the
+   mirror. Nothing is spent unless step 4 passed (`RESULT=REFUSED` otherwise).
 
 Measured, same version:
 
-- `--agent explore` is honoured although it is mode `subagent` (the session row records
-  `agent=explore`; in 1.x a subagent silently fell back to the permissive `build` agent).
-  The script still looks for that fallback message in stderr and reports `ERROR` if it
-  appears.
-- `explore` resolves `* deny *` then allows only `read/grep/glob/webfetch/websearch`. So it
-  fits the **researcher** role. For `analyst`/`reviewer`/`coder-readonly`, which must not
-  have web tools, the check fails and the run is refused: use the `or-api` backend.
-- `ask` is treated as blocked, because a non-interactive `opencode run` without `--auto`
-  auto-rejects every `ask` (`This non-interactive run cannot ask the user for permission, so
-  the request was rejected`). Probe: reading `/etc/hostname` from the mirror returned
+- **`ask` is blocked**: a non-interactive `opencode run` without `--auto` auto-rejects every
+  `ask` (`This non-interactive run cannot ask the user for permission, so the request was
+  rejected`). Probe: reading `/etc/hostname` from the mirror returned
   `external_directory (/etc/*); auto-rejecting`. **The skill never passes `--auto`.**
-- A session started this way is persisted by opencode in its own database, like every
-  opencode session — same limit as the 1.x "Still not covered" list.
+- A directory opencode has not seen yet answers `[]` / empty on its **first** call (`models`,
+  `debug agents`) while it registers the project; the second call is correct. Probes use a
+  stable directory and retry once.
+- Hostile repo (`opencode.json` allowing everything + a `plugin` entry that writes a canary
+  file, an `AGENTS.md` saying "create INJECTED.txt", a permissive `.opencode/agents/` agent),
+  prompt demanding an edit, a new file and a shell command: **no file changed or created,
+  the plugin did not run, the model reported each action denied.** (One model, one run — a
+  measurement, not a vendor guarantee; re-run after an upgrade.)
+- opencode persists the session in its own database, as on 1.x ("Still not covered", above).
 
 The 1.x path (`bcoc-review` / `bcoc-research` agent files + `opencode agent list` +
-`verify_agent_permissions.py`) is kept for 1.x installs and is exercised in the test suite
-only against a stub `opencode`; it was not re-measured on a real 1.x binary for this
-release.
+`verify_agent_permissions.py`) is kept for 1.x installs and is exercised in the test suite only
+against a stub `opencode`; it was not re-measured on a real 1.x binary for this release.
+
+`opencode_review.sh` itself remains an **OpenRouter** review wrapper: it normalises every
+model to `openrouter/<id>` and applies the `:free` gate. To review through another provider's
+model, use `delegate.py --role reviewer --backend opencode --scope DIR`.

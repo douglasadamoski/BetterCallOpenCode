@@ -58,6 +58,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import discover_providers as dp  # noqa: E402
 import ledger  # noqa: E402
+import opencode_v2 as ov2  # noqa: E402
 import select_models as sm  # noqa: E402
 from redact import redact  # noqa: E402
 import redact as _redact_mod  # noqa: E402
@@ -282,58 +283,17 @@ def opencode_major() -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _global(resource: Any) -> bool:
-    r = str(resource if resource is not None else "*").strip()
-    return r == "" or re.fullmatch(r"[*/]+", r) is not None
-
-
-def verify_v2(agents: Any, agent: str, must_block: List[str]) -> Tuple[bool, str]:
-    """opencode v2: `opencode debug agents` is JSON; each agent has an ordered
-    `permissions` list of {action, resource, effect}. Resolution is last-global-match-wins.
-
-    `ask` counts as blocked: measured on 2.0.22, a non-interactive `opencode run` without
-    --auto auto-rejects every `ask` ("This non-interactive run cannot ask the user for
-    permission, so the request was rejected"). This script never passes --auto. A scoped
-    (non-global) allow does not flip the verdict, same as the v1 verifier.
-    """
-    ag = next((x for x in agents if isinstance(x, dict) and x.get("id") == agent), None) \
-        if isinstance(agents, list) else None
-    if ag is None:
-        return False, f"agent {agent!r} not found in `opencode debug agents`"
-    rules = [r for r in (ag.get("permissions") or []) if isinstance(r, dict)]
-    bad = []
-    # A scoped allow is NOT harmless for these: `bash allow "git *"` is arbitrary code
-    # execution (`git -c core.pager=...`), `edit allow <path>` is a write. (external_directory
-    # is different: the built-in agents carry scoped allows for opencode's own scratch dirs.)
-    for r in rules:
-        if (r.get("effect") == "allow" and r.get("action") in ("bash", "edit", "subagent", "task")
-                and not _global(r.get("resource"))):
-            bad.append(f"{r.get('action')} allowed for {r.get('resource')!r}")
-    # The default must not be a grant either: anything not named below (MCP tools, skills,
-    # write-class actions) falls through to it.
-    default = None
-    for r in rules:
-        if r.get("action") == "*" and _global(r.get("resource")):
-            default = r.get("effect")
-    if default not in ("deny", "ask"):
-        bad.append(f"default(*)={default or 'absent'}")
-    for perm in must_block:
-        eff = None
-        for r in rules:
-            if r.get("action") in (perm, "*") and _global(r.get("resource")):
-                eff = r.get("effect")
-        if eff not in ("deny", "ask"):
-            bad.append(f"{perm}={eff or 'absent'}")
-    if bad:
-        return False, "permissions are not blocked: " + ", ".join(bad)
-    return True, ""
+# One implementation of the 2.x gate, shared with opencode_review.sh (scripts/opencode_v2.py).
+verify_v2 = ov2.verify_v2
+parse_v2_events = ov2.parse_events
 
 
 def _must_block(role: str, v2: bool) -> List[str]:
-    base = ["edit", "bash", "external_directory"]
-    base.append("subagent" if v2 else "task")
+    if v2:
+        return ov2.must_block(ROLES[role]["web"])
+    base = ["edit", "bash", "external_directory", "task"]
     if not ROLES[role]["web"]:
-        base += ["webfetch", "websearch"] if v2 else ["webfetch"]
+        base.append("webfetch")
     return base
 
 
@@ -351,24 +311,6 @@ def _run_group(argv: List[str], env: Dict[str, str], cwd: str, timeout: int) -> 
             pass
         out, err = p.communicate()
         return 124, out or "", err or "", True
-
-
-def parse_v2_events(out: str) -> Tuple[str, List[str]]:
-    texts, errs = [], []
-    for line in out.splitlines():
-        try:
-            o = json.loads(line)
-        except ValueError:
-            continue
-        part = o.get("part") if isinstance(o, dict) else None
-        if not isinstance(part, dict):
-            continue
-        if o.get("type") == "text" and isinstance(part.get("text"), str):
-            texts.append(part["text"])
-        st = part.get("state")
-        if o.get("type") == "tool_use" and isinstance(st, dict) and st.get("status") == "error":
-            errs.append(str(st.get("error"))[:200])
-    return "".join(texts).strip(), errs
 
 
 def classify_cli_failure(rc: int, err: str) -> str:
@@ -407,7 +349,11 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
         return "REFUSED", {"error": "cannot determine the opencode version, so its agent "
                            "permissions cannot be verified"}
     v2 = major >= 2
-    agent = a.agent or ("explore" if v2 else ("bcoc-research" if ROLES[role]["web"] else "bcoc-review"))
+    if v2 and a.agent:
+        return "BAD_ARGS", {"error": "--agent is not supported on opencode 2.x: the restricted agent "
+                            "is defined (and verified) per run in the filtered mirror"}
+    agent = (f"bcoc-{role}" if v2 else
+             (a.agent or ("bcoc-research" if ROLES[role]["web"] else "bcoc-review")))
 
     run_dir = Path(tempfile.mkdtemp(prefix="bcoc.deleg."))
     os.chmod(run_dir, 0o700)
@@ -424,22 +370,16 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
         env = child_env(pid)
 
         if v2:
-            # Verified with the SAME cwd and env the real run uses, so what is checked is
-            # what will be resolved (a project config in some other cwd must not decide it).
-            agents = None
-            for attempt in range(3):
-                raw = subprocess.run(["opencode", "debug", "agents"], capture_output=True, text=True,
-                                     timeout=60, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env).stdout
-                try:
-                    agents = json.loads(raw)
-                except ValueError:
-                    agents = None
-                # A directory opencode has not seen yet answers `[]` the first time while it
-                # registers the project (measured, 2.0.22). Empty is "not ready", not "no rules".
-                if agents:
-                    break
-                time.sleep(2)
-            ok, why = verify_v2(agents, agent, _must_block(role, True))
+            # The agent is defined in an opencode.json THIS script writes into the mirror
+            # (repo-supplied config is set aside), then verified with the SAME cwd and env
+            # the real run uses. See scripts/opencode_v2.py.
+            env.pop("OPENCODE_DISABLE_PROJECT_CONFIG", None)
+            env.pop("OPENCODE_PERMISSION", None)
+            try:
+                ov2.prepare(cwd, agent, ROLES[role]["web"])
+            except (OSError, ValueError) as e:
+                return "ERROR", {"error": f"could not prepare the mirror config: {e}"}
+            ok, why = ov2.verify_v2(ov2.debug_agents(cwd, env), agent, _must_block(role, True))
         else:
             cfgdir = Path(os.environ.get("BCOPENCODE_OPENCODE_CONFIG_DIR") or SKILL_DIR / "opencode-config")
             (cfgdir / "agents").mkdir(parents=True, exist_ok=True)

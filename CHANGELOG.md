@@ -78,6 +78,22 @@ Adds provider discovery, a capability cache, model selection and delegated worke
   processes, so N parallel workers can overshoot it by up to N−1 (see the Quota note in
   README). Keep `--cap` well under the provider's real limit.
 
+### opencode 2.x support (follow-up, same release)
+
+- New `scripts/opencode_v2.py`: on 2.x the restricted agent is defined in an `opencode.json`
+  this skill writes into the **filtered mirror** (repo-supplied `opencode.json`, `AGENTS.md`,
+  `CLAUDE.md`… are renamed to `*.reviewed`), default-deny + allowlist, `mode: primary`, and
+  verified with `opencode debug agents` run in that directory with the run's own environment.
+  `opencode_review.sh --backend opencode` and `delegate.py --backend opencode` both use it,
+  so **every** role works on 2.x (the earlier `explore`-only workaround is gone).
+- The shell wrapper detects the major version (`opencode --version` prints `opencode v2.0.22`)
+  and branches; the 1.x path is unchanged.
+- Found: the 2.x action for commands is named `shell`, not `bash`; the verifier checks both.
+- Verified live against a hostile repo (permissive `opencode.json` with a plugin entry,
+  injecting `AGENTS.md`, permissive `.opencode/agents/`): nothing was edited, created or run.
+- Still OpenRouter-only by design: `opencode_review.sh` normalises models to `openrouter/<id>`;
+  use `delegate.py` for other providers.
+
 ### Not verified
 
 - No live OpenRouter request was made for this release (no key on the build host); OpenRouter

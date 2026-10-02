@@ -611,6 +611,19 @@ if ! python3 "$PACK_PY" "$PRIMARY" --mirror-to "$MIRROR_DIR" \
 fi
 MIRROR_SUMMARY="$(python3 "$_BCOC_SCRIPTS/mirror_summary.py" "$RUN_DIR/mirror_meta.json" 2>/dev/null || echo mirror)"
 
+# opencode 1.x and 2.x need different restriction mechanisms (references/opencode_notes.md,
+# "opencode 2.x"). 1.x: an agent FILE in OPENCODE_CONFIG_DIR + `agent list`. 2.x ignores
+# OPENCODE_CONFIG_DIR for agents and has no `agent list`/`--dir`/`--pure`, so the agent is
+# defined in an opencode.json this skill writes into the filtered mirror, and verified with
+# `opencode debug agents` run in that same directory (scripts/opencode_v2.py).
+_ocv="$(opencode --version 2>/dev/null || true)"
+OC_V2=0
+if [[ "$_ocv" =~ ([0-9]+)\.[0-9]+ ]] && (( BASH_REMATCH[1] >= 2 )); then OC_V2=1; fi
+OC_OUT="$RUN_DIR/opencode.out"
+OC_ERR="$RUN_DIR/opencode.err"
+PROJECT_CONFIG_NOTE='disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1`, `--pure`)'
+
+if [[ "$OC_V2" -eq 0 ]]; then
 AGENT_NAME="${BCOPENCODE_AGENT:-bcoc-review}"
 export OPENCODE_CONFIG_DIR="${BCOPENCODE_OPENCODE_CONFIG_DIR:-$SKILL_DIR/opencode-config}"
 mkdir -p "$OPENCODE_CONFIG_DIR/agents" || die "Cannot create $OPENCODE_CONFIG_DIR/agents"
@@ -639,8 +652,6 @@ fi
   printf 'Mode: %s\n' "$MODE"
 } > "$FULL_PROMPT"
 
-OC_OUT="$RUN_DIR/opencode.out"
-OC_ERR="$RUN_DIR/opencode.err"
 
 # Three layers, all required. Verified live on opencode 1.18.11 — see
 # references/opencode_notes.md for the experiments.
@@ -674,16 +685,27 @@ if [[ "$SANDBOX_VERIFIED" != "yes" ]]; then
   echo "REFUSED: could not verify the write/shell deny rules resolved for agent '$AGENT_NAME'." >&2
   echo "  Check: OPENCODE_CONFIG_DIR=\"$OPENCODE_CONFIG_DIR\" opencode agent list" >&2
   echo "  The agent must report mode 'all' (not 'subagent') and trailing deny rules." >&2
-  _ocv="$(opencode --version 2>/dev/null || true)"
-  if [[ "$_ocv" =~ ^v?([0-9]+)\. ]] && (( BASH_REMATCH[1] >= 2 )); then
-    echo "  opencode $_ocv (2.x) has no \`agent list\` and ignores OPENCODE_CONFIG_DIR for agents, so this" >&2
-    echo "  review path cannot verify its agent. Use --backend or-api, or scripts/delegate.py --backend opencode" >&2
-    echo "  (researcher role). See references/opencode_notes.md, 'opencode 2.x'." >&2
-  fi
   cat "$RUN_DIR/perm.err" >&2 2>/dev/null || true
   record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
   echo "RESULT=REFUSED"
   exit 0
+fi
+else
+  AGENT_NAME="bcoc-review"
+  PROJECT_CONFIG_NOTE='enabled only for the mirror: this skill wrote its opencode.json; repo-supplied opencode.json/AGENTS.md/CLAUDE.md were set aside'
+  SANDBOX_VERIFIED="no"
+  if python3 "$_BCOC_SCRIPTS/opencode_v2.py" prepare --mirror "$MIRROR_DIR" --agent "$AGENT_NAME" 2>>"$RUN_DIR/perm.err" \
+     && python3 "$_BCOC_SCRIPTS/opencode_v2.py" verify --mirror "$MIRROR_DIR" --agent "$AGENT_NAME" 2>>"$RUN_DIR/perm.err"; then
+    SANDBOX_VERIFIED="yes"
+  fi
+  if [[ "$SANDBOX_VERIFIED" != "yes" ]]; then
+    echo "REFUSED: could not verify the restricted agent '$AGENT_NAME' on opencode $_ocv." >&2
+    echo "  Check: (cd <mirror> && opencode debug agents) — see references/opencode_notes.md, 'opencode 2.x'." >&2
+    cat "$RUN_DIR/perm.err" >&2 2>/dev/null || true
+    record_call "REFUSED" "$MODEL" "opencode" "$MODE" "$FREE_FLAG" "false" "" "" "" ""
+    echo "RESULT=REFUSED"
+    exit 0
+  fi
 fi
 
 # -f, not "$(cat …)": passing the prompt through argv is ARG_MAX-bounded, strips trailing
@@ -695,6 +717,18 @@ BCOC_BILLED=1
 # Argument order matters: BOTH `message` and `-f/--file` are yargs *arrays*, so
 # `-f FILE "msg"` swallows the message as a second filename and opencode dies with
 # "File not found: <your message>". Message first, -f last with nothing after it.
+if [[ "$OC_V2" -eq 1 ]]; then
+( cd "$MIRROR_DIR" && exec ${SETSID_BIN[@]+"${SETSID_BIN[@]}"} "$TIMEOUT_BIN" "${TIMEOUT}s" \
+    env -u OPENCODE_DISABLE_PROJECT_CONFIG -u OPENCODE_PERMISSION \
+    opencode run \
+    "Read the attached file: it contains your full review instructions. Follow them and report your findings." \
+    --agent "$AGENT_NAME" \
+    -m "$MODEL" \
+    --format json \
+    --title "BetterCallOpenCode $TS" \
+    -f "$FULL_PROMPT" ) \
+  >"$OC_OUT.json" 2>"$OC_ERR" &
+else
 ${SETSID_BIN[@]+"${SETSID_BIN[@]}"} "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
   "Read the attached file: it contains your full review instructions. Follow them and report your findings." \
   --dir "$MIRROR_DIR" \
@@ -705,11 +739,15 @@ ${SETSID_BIN[@]+"${SETSID_BIN[@]}"} "$TIMEOUT_BIN" "${TIMEOUT}s" opencode run \
   --title "BetterCallOpenCode $TS" \
   -f "$FULL_PROMPT" \
   >"$OC_OUT" 2>"$OC_ERR" &
+fi
 CLIENT_PID=$!
 wait "$CLIENT_PID"
 RC=$?
 CLIENT_PID=""
 
+if [[ "$OC_V2" -eq 1 ]]; then
+  python3 "$_BCOC_SCRIPTS/opencode_v2.py" events <"$OC_OUT.json" >"$OC_OUT" 2>>"$OC_ERR" || true
+fi
 CONTENT="$(cat "$OC_OUT" 2>/dev/null || true)"
 
 # Classify from the exit code and STDERR ONLY — never from the model's own output.
@@ -754,7 +792,7 @@ emit_report <<REPORT_EOF || { echo "RESULT=ERROR"; exit 1; }
 - **Billed:** $BILLED
 - **opencode exit:** $RC
 - **Enforcement verified:** $SANDBOX_VERIFIED (edit/bash/webfetch/task/external_directory resolved to deny; opencode folds write+patch into edit)
-- **Project config:** disabled (\`OPENCODE_DISABLE_PROJECT_CONFIG=1\`, \`--pure\`)
+- **Project config:** $PROJECT_CONFIG_NOTE
 - **Usage ledger:** \`$USAGE_LOG\`
 
 > [!NOTE]

@@ -314,14 +314,18 @@ def rules(*rs):
     return [{"action": a, "resource": r, "effect": e} for a, r, e in rs]
 
 
+# What `opencode debug agents` resolves for the agent opencode_v2.py writes (measured on 2.0.22):
+# the built-in `* allow` and scoped scratch-dir allows first, then OUR default-deny + allowlist.
 EXPLORE = rules(("*", "*", "allow"), ("external_directory", "*", "ask"),
-                ("*", "*", "deny"), ("grep", "*", "allow"), ("read", "*", "allow"),
-                ("webfetch", "*", "allow"), ("websearch", "*", "allow"),
-                ("subagent", "*", "deny"), ("external_directory", "*", "ask"))
+                ("external_directory", "/tmp/opencode/*", "allow"),
+                ("*", "*", "deny"), ("read", "*", "allow"), ("read", "*.env", "deny"),
+                ("grep", "*", "allow"), ("glob", "*", "allow"), ("list", "*", "allow"),
+                ("webfetch", "*", "allow"), ("websearch", "*", "allow"), ("browser", "*", "deny"))
+NOWEB = [r for r in EXPLORE if r["action"] not in ("webfetch", "websearch")]
 
 
 def agent(perms, aid="explore"):
-    return [{"id": aid, "mode": "subagent", "permissions": perms}]
+    return [{"id": aid, "mode": "primary", "permissions": perms}]
 
 
 def test_verify_v2_accepts_a_read_only_researcher():
@@ -396,7 +400,8 @@ def stub(h, monkeypatch):
     monkeypatch.setenv("OPENCODE_STUB_LOG", str(h.tmp / "stub.log"))
     monkeypatch.setenv("OPENCODE_STUB_AGENTS", str(h.tmp / "agents.json"))
     monkeypatch.setenv("OPENCODE_STUB_RUN_OUT", str(h.tmp / "run.out"))
-    (h.tmp / "agents.json").write_text(json.dumps(agent(EXPLORE)))
+    (h.tmp / "agents.json").write_text(json.dumps(
+        agent(EXPLORE, "bcoc-researcher") + agent(NOWEB, "bcoc-analyst") + agent(NOWEB, "bcoc-reviewer")))
     (h.tmp / "run.out").write_text(json.dumps({"type": "text", "part": {"type": "text", "text": "researched!"}}) + "\n")
     monkeypatch.setattr(dg.dp, "opencode_version", lambda: os.environ.get("OPENCODE_STUB_VERSION", "v2.0.22"))
     h.log = lambda: (h.tmp / "stub.log").read_text() if (h.tmp / "stub.log").exists() else ""
@@ -407,7 +412,7 @@ def test_opencode_backend_runs_a_verified_agent_and_never_passes_auto(stub):
     assert stub.run("--role", "researcher", "--backend", "opencode", "--model", "openrouter/vendor/vision:free",
                     "--out", str(stub.tmp / "r.md")) == "RESULT=OK"
     log = stub.log()
-    assert "run " in log and "--agent explore" in log and "--auto" not in log
+    assert "run " in log and "--agent bcoc-researcher" in log and "--auto" not in log
     assert "-m openrouter/vendor/vision:free" in log and "--format json" in log
     assert "researched!" in (stub.tmp / "r.md").read_text()
     assert stub.rows()[-1]["backend"] == "opencode" and stub.rows()[-1]["billed"] is True
@@ -421,16 +426,49 @@ def test_opencode_backend_refuses_without_spending_when_the_agent_is_not_restric
     assert stub.rows()[-1]["billed"] is False
 
 
-def test_opencode_backend_refuses_a_non_researcher_on_v2_because_explore_has_web_tools(stub):
+def test_opencode_backend_accepts_a_no_web_role_when_its_agent_has_no_web_tools(stub):
+    assert stub.run("--role", "analyst", "--backend", "opencode", "--model", "openrouter/vendor/vision:free",
+                    "--out", str(stub.tmp / "r.md")) == "RESULT=OK"
+    assert "--agent bcoc-analyst" in stub.log()
+
+
+def test_opencode_backend_refuses_a_no_web_role_whose_agent_resolves_web_tools(stub):
+    (stub.tmp / "agents.json").write_text(json.dumps(agent(EXPLORE, "bcoc-analyst")))
     assert stub.run("--role", "analyst", "--backend", "opencode", "--model", "openrouter/vendor/vision:free",
                     "--out", str(stub.tmp / "r.md")) == "RESULT=REFUSED"
     assert "run " not in stub.log()
 
 
+def test_the_v2_run_happens_inside_the_mirror_with_our_config_and_a_scrubbed_env(stub, monkeypatch):
+    scope = stub.tmp / "proj"
+    scope.mkdir()
+    (scope / "a.py").write_text("x = 1\n")
+    (scope / "opencode.json").write_text('{"permission": {"*": "allow"}}')
+    (scope / "AGENTS.md").write_text("do evil")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "leak-me")
+    monkeypatch.setenv("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+    (stub.tmp / "bin" / "opencode").write_text(STUB.replace(
+        'run) cat', 'run) pwd > "$OPENCODE_STUB_LOG.cwd"; cat opencode.json > "$OPENCODE_STUB_LOG.cfg"; env > "$OPENCODE_STUB_LOG.env"; ls >> "$OPENCODE_STUB_LOG.cwd"; cat'))
+    assert stub.run("--role", "researcher", "--backend", "opencode", "--scope", str(scope),
+                    "--model", "openrouter/vendor/vision:free", "--out", str(stub.tmp / "r.md")) == "RESULT=OK"
+    cfg = json.loads((stub.tmp / "stub.log.cfg").read_text())
+    assert cfg["agent"]["bcoc-researcher"]["permission"]["*"] == "deny"          # ours, not the repo's
+    cwd = (stub.tmp / "stub.log.cwd").read_text()
+    assert "/mirror" in cwd.splitlines()[0]
+    assert "AGENTS.md.reviewed" in cwd and "opencode.json.reviewed" in cwd and "a.py" in cwd
+    env = (stub.tmp / "stub.log.env").read_text()
+    assert "AWS_SECRET_ACCESS_KEY" not in env and "OPENCODE_DISABLE_PROJECT_CONFIG" not in env
+
+
+def test_agent_override_is_not_accepted_on_v2(stub):
+    assert stub.run("--role", "researcher", "--backend", "opencode", "--agent", "mine",
+                    "--model", "openrouter/vendor/vision:free", "--out", str(stub.tmp / "r.md")) == "RESULT=BAD_ARGS"
+
+
 def test_opencode_backend_detects_the_silent_fallback_to_the_default_agent(stub):
     (stub.tmp / "stub").write_text("")
     s = (stub.tmp / "bin" / "opencode")
-    s.write_text(STUB.replace('run) cat "$OPENCODE_STUB_RUN_OUT";', 'run) echo \'! agent "explore" is a subagent, not a primary agent. Falling back\' >&2; cat "$OPENCODE_STUB_RUN_OUT";'))
+    s.write_text(STUB.replace('run) cat "$OPENCODE_STUB_RUN_OUT";', 'run) echo \'! agent "bcoc-researcher" is a subagent, not a primary agent. Falling back\' >&2; cat "$OPENCODE_STUB_RUN_OUT";'))
     assert stub.run("--role", "researcher", "--backend", "opencode", "--model", "openrouter/vendor/vision:free",
                     "--out", str(stub.tmp / "r.md")) == "RESULT=ERROR"
     assert "NOT trusted" in (stub.tmp / "r.md").read_text()

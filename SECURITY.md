@@ -181,9 +181,15 @@ stated here because an unstated assumption is indistinguishable from an oversigh
 - **The money gate is data-driven.** For providers that publish no pricing, "zero-cost" is
   whatever you told `--set-policy`. A wrong answer there removes the gate for that provider.
   `--allow-paid` still exists only for explicit consent.
-- **opencode 2.x.** Agent restrictions are verified from `opencode debug agents` before
-  every run; the check relies on non-interactive `ask` being auto-rejected, which is
-  measured behaviour of a specific version, not a vendor guarantee (`opencode_notes.md`).
+- **opencode 2.x.** On 2.x project config is *enabled* for the mirror, because that is the
+  only place the restricted agent can be defined. The mirror is built by this skill: hidden
+  directories are pruned, the reviewed repo's root `opencode.json`/`AGENTS.md`/`CLAUDE.md`
+  are renamed to `*.reviewed` and this skill's `opencode.json` is written. Restrictions are
+  then verified from `opencode debug agents` in that same directory before every run. The
+  check relies on non-interactive `ask` being auto-rejected and on rule resolution being
+  last-match-wins — measured behaviour of a specific version, not a vendor guarantee. If a
+  future opencode adds another way for repo content to reach the config (a new file name),
+  `NEUTRALISE` in `scripts/opencode_v2.py` is the list to extend.
 
 ## Out of scope
 
