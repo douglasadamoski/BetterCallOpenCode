@@ -103,3 +103,18 @@ def test_run_env_keeps_project_config_enabled_and_drops_permission_overrides(mon
     monkeypatch.setenv("OPENCODE_PERMISSION", "{}")
     e = ov2.run_env()
     assert "OPENCODE_DISABLE_PROJECT_CONFIG" not in e and "OPENCODE_PERMISSION" not in e
+
+
+def test_narration_before_tool_calls_is_not_part_of_the_answer():
+    lines = [{"type": "text", "part": {"text": "Let me search. "}},
+             {"type": "tool_use", "part": {"state": {"status": "completed"}}},
+             {"type": "text", "part": {"text": "Now fetching. "}},
+             {"type": "tool_use", "part": {"state": {"status": "error", "error": "denied"}}},
+             {"type": "text", "part": {"text": "## Answer\nfinal"}}]
+    text, errs = ov2.parse_events("\n".join(json.dumps(x) for x in lines))
+    assert text == "## Answer\nfinal" and errs == ["denied"]
+
+
+def test_a_run_with_no_tool_calls_keeps_all_text():
+    lines = [{"type": "text", "part": {"text": "A"}}, {"type": "text", "part": {"text": "B"}}]
+    assert ov2.parse_events("\n".join(json.dumps(x) for x in lines))[0] == "AB"

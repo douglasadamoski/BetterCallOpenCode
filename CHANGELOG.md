@@ -94,6 +94,10 @@ Adds provider discovery, a capability cache, model selection and delegated worke
 - Still OpenRouter-only by design: `opencode_review.sh` normalises models to `openrouter/<id>`;
   use `delegate.py` for other providers.
 
+- A 10-worker deep-research run (5 sub-questions × 2 models, researcher role, opencode backend,
+  web tools) completed 8/10; the other two timed out at 900 s. `--timeout 1800` is recommended
+  for researchers. `parse_events` now keeps only the text after the model's last tool call.
+
 ### Not verified
 
 - No live OpenRouter request was made for this release (no key on the build host); OpenRouter

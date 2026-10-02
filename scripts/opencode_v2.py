@@ -180,7 +180,9 @@ def debug_agents(cwd: Path, env: Dict[str, str], tries: int = 3) -> Optional[Any
 
 
 def parse_events(out: str) -> Tuple[str, List[str]]:
-    """`opencode run --format json` -> (assistant text, denied tool-call messages)."""
+    """`opencode run --format json` -> (the answer, denied tool-call messages).
+
+    The answer is the text emitted after the last tool call."""
     texts: List[str] = []
     errs: List[str] = []
     for line in out.splitlines():
@@ -193,6 +195,12 @@ def parse_events(out: str) -> Tuple[str, List[str]]:
             continue
         if o.get("type") == "text" and isinstance(part.get("text"), str):
             texts.append(part["text"])
+        if o.get("type") == "tool_use":
+            # Narration before a tool call ("Let me search for...") is working-out, not the
+            # answer. Keep only what the model said AFTER its last tool call. Measured: a
+            # researcher run with dozens of web calls otherwise put every interim sentence
+            # in front of the report. (If the model never calls a tool this changes nothing.)
+            texts = []
         st = part.get("state")
         if o.get("type") == "tool_use" and isinstance(st, dict) and st.get("status") == "error":
             errs.append(str(st.get("error"))[:200])
