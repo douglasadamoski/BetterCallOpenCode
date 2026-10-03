@@ -98,6 +98,16 @@ Adds provider discovery, a capability cache, model selection and delegated worke
   web tools) completed 8/10; the other two timed out at 900 s. `--timeout 1800` is recommended
   for researchers. `parse_events` now keeps only the text after the model's last tool call.
 
+- `delegate.py` now **reports files the secret filter withheld** (result front matter
+  `withheld_files:`, a note in the result, stderr, the JSON sidecar) and tells the model they
+  exist. Found when a status sentence of the form `<short word>: <prose>` in a reviewed document
+  read as a password assignment, so the whole file was silently withheld and the reviewers had
+  to discover its absence. The filter itself is unchanged (it errs toward withholding on purpose).
+- Deep-research validation run (two models, two critique rounds, mechanical citation check):
+  see SKILL.md Mode E, "Validate before you trust". Two of the process's own mistakes were
+  caught by it: a citation checker whose requests were refused by some CDNs reported live links
+  as dead, and "both models agreed" labels were applied to points only one model made.
+
 ### Not verified
 
 - No live OpenRouter request was made for this release (no key on the build host); OpenRouter
