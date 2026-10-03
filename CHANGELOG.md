@@ -28,6 +28,13 @@ Claude as the orchestrator, opencode models as many small workers.
 - opencode `error` events are now read: 401/403 → `AUTH`, 402/429 → `QUOTA`, 5xx → `UNREACHABLE`,
   with the provider's own message, instead of "returned no text".
 
+### Congestion control
+- `fanout.py` now **starts at 2 sessions** (`--start-parallel`) and adds one after `--recover-after`
+  (4) clean successes, up to `--max-parallel`. It **halves on stalls, timeouts and salvaged sessions**
+  as well as on rate-limit answers (once per `--cooldown`, 60 s; floor `--min-parallel`, 1). Before this
+  it reacted only to 429s, so during a provider hang it kept four sessions stuck. Each change is
+  written to the manifest with its reason.
+
 ### Found by testing the limits (details in `references/opencode_notes.md`)
 - Shipped bugs the tests caught: units that arrived while the shared mirror was being built skipped
   it; the first attempt of every unit went to the first model in a pool; the cap given to the

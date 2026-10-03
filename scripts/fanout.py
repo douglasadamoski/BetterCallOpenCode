@@ -294,7 +294,7 @@ class Run:
         self.history: Dict[str, List[Dict[str, Any]]] = {}
         self.dead_models: Set[str] = set()
         self.model_fail: Counter = Counter()
-        self.eff = args.max_parallel                     # adaptive effective parallelism
+        self.eff = max(1, min(args.start_parallel, args.max_parallel))   # adaptive effective parallelism
         self.ok_streak = 0
         self.last_cut = 0.0
         self.not_before: Dict[str, float] = {}           # uid -> earliest retry time
@@ -326,20 +326,32 @@ class Run:
                 self.final[e["unit"]] = e
 
     # -- adaptive parallelism ----------------------------------------------------------
-    def on_result(self, word: str) -> None:
+    def on_result(self, word: str, congested: bool = False) -> None:
+        """Congestion control, AIMD-style.
+
+        Cut (halve, at most once per cooldown, never below --min-parallel) on a rate-limit answer
+        AND on a stall/timeout/salvaged session: measured, a provider under load does not always
+        answer 429 — it goes silent, and a scheduler that only reacts to 429s keeps four sessions
+        hanging. Grow by one after --recover-after consecutive CLEAN successes, up to
+        --max-parallel, starting low (--start-parallel)."""
         with self.lock:
-            if word == "QUOTA":
+            before = self.eff
+            if word == "QUOTA" or congested:
                 now = time.monotonic()
                 if now - self.last_cut > self.args.cooldown:
-                    self.eff = max(1, self.eff // 2)
+                    self.eff = max(self.args.min_parallel, self.eff // 2)
                     self.last_cut = now
                 self.ok_streak = 0
             elif word in OK_WORDS:
                 self.ok_streak += 1
-                if self.ok_streak >= 10 and self.eff < self.args.max_parallel:
+                if self.ok_streak >= self.args.recover_after and self.eff < self.args.max_parallel:
                     self.eff += 1
                     self.ok_streak = 0
             self.par_trace.append((round(time.monotonic() - self.t0, 1), self.eff))
+            changed = self.eff != before
+        if changed:
+            self.log({"event": "parallelism", "from": before, "to": self.eff,
+                      "why": "rate limit" if word == "QUOTA" else "stall/timeout" if congested else "clean successes"})
 
     # -- workdir -----------------------------------------------------------------------
     def workdir_for(self, u: Dict[str, Any], model: str) -> Optional[Path]:
@@ -490,7 +502,9 @@ class Run:
         if self.stop.is_set() and not self.cap_hit and word not in OK_WORDS:
             word = rec["result"] = "INTERRUPTED"
         self.history.setdefault(uid, []).append(rec)
-        self.on_result(word)
+        # a salvaged result WAS a stall, whatever its final word: it must not count as a clean success
+        congested = word == "TIMEOUT" or bool(rec.get("salvaged"))
+        self.on_result("TIMEOUT" if congested and word in OK_WORDS else word, congested)
         if word == "CAP":
             # the daily cap is global: every other unit would hit it too. Stop launching; what is
             # already running finishes, what has not started is reported as not run.
@@ -714,14 +728,19 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run a spec")
     r.add_argument("spec")
     r.add_argument("--run-dir", required=True)
-    r.add_argument("--max-parallel", type=int, default=8)
+    r.add_argument("--max-parallel", type=int, default=8, help="ceiling for concurrent sessions")
+    r.add_argument("--start-parallel", type=int, default=2,
+                   help="begin with this many and grow after clean successes (measured: research units "
+                        "with web tools stalled at 80%% with 4 in flight)")
+    r.add_argument("--min-parallel", type=int, default=1, help="never cut below this")
+    r.add_argument("--recover-after", type=int, default=4, help="clean successes needed to add one session")
     r.add_argument("--per-model", type=int, default=4, help="concurrent sessions per model")
     r.add_argument("--max-units", type=int, default=1000)
     r.add_argument("--cap", type=int, default=int(os.environ.get("BCOPENCODE_CAP", 200) or 200))
     r.add_argument("--force", action="store_true", help="run even if the cap check fails")
     r.add_argument("--resume", action="store_true", help="continue a run directory; finished units are skipped")
     r.add_argument("--dry-run", action="store_true")
-    r.add_argument("--cooldown", type=float, default=30.0, help="seconds between parallelism cuts")
+    r.add_argument("--cooldown", type=float, default=60.0, help="seconds between parallelism cuts")
     r.add_argument("--quota-backoff", type=float, default=5.0, help="first wait after a rate-limit answer (doubles)")
     r.add_argument("--retry-delay", type=float, default=1.0, help="wait before retrying any other failure")
     r.add_argument("--max-subst-chars", type=int, default=80000)
@@ -740,8 +759,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if getattr(args, "max_parallel", 1) < 1 or getattr(args, "per_model", 1) < 1:
-        print("fanout: --max-parallel and --per-model must be >= 1", file=sys.stderr)
+    if any(getattr(args, k, 1) < 1 for k in ("max_parallel", "per_model", "start_parallel", "min_parallel", "recover_after")):
+        print("fanout: --max-parallel, --per-model, --start-parallel, --min-parallel and --recover-after must be >= 1",
+              file=sys.stderr)
         print("RESULT=BAD_ARGS")
         return 0
     return args.fn(args)

@@ -385,13 +385,16 @@ the "see everything at once" view; compare across units here), then individual
 **What it does for you** (each exists because it failed at scale): one session per unit; a
 **stall watchdog** (no event for `stall_timeout` s) plus a total timeout, and a killed session is
 **resumed to write its report from what it found** (`TRUNCATED`, "salvaged"); retries on another
-model; a model that keeps failing `AUTH` is dropped for the run; a rate-limit answer **halves the
-effective parallelism**; one verified restricted mirror shared by all units; a manifest so
+model; a model that keeps failing `AUTH` is dropped for the run; it **starts with 2 sessions and
+grows one at a time after 4 clean successes**, and a rate-limit answer **or a stall/timeout/salvaged
+session halves the parallelism** (never below 1; one cut per 60 s; every change is in the manifest); one verified restricted mirror shared by all units; a manifest so
 `--resume` skips finished units; the daily cap checked up front for the whole job and passed to every
 unit; and on Ctrl-C/SIGTERM in-flight units are killed and recorded `INTERRUPTED`.
 
 **Limits to respect** (measured; see `references/opencode_notes.md`, "Running many sessions"):
-- Keep parallelism modest — **6–12 per provider**. 25–100 concurrent sessions degraded the provider
+- Parallelism starts at 2 (`--start-parallel`) and is capped by `--max-parallel`. For research units with
+  web tools keep the ceiling at **2** and `stall_timeout` ≥ 300 (4 in flight stalled ~80 % of the time).
+  For one-step units 6–12 per provider is fine. 25–100 concurrent sessions degraded the provider
   for ~10 minutes (afterwards even a lone call returned nothing for a while). Throughput rose only
   sublinearly (0.18 → 0.32 → 0.40 units/s at 3 → 8 → 16), and wall time is set by the slowest call.
 - Latency has a heavy tail (median seconds, ~5–8 % of calls tens of seconds to minutes). Use
