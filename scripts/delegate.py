@@ -175,18 +175,40 @@ def read_prompt(path: str) -> str:
         raise Bad(f"cannot read --prompt-file: {e}")
 
 
-def pack_scope(scope: str, max_input_tokens: int) -> str:
+def withheld_names(meta: Dict[str, Any]) -> List[str]:
+    """Files the secret filter kept out of the model's view (by name or by content)."""
+    names = list(meta.get("secrets_skipped_by_name") or []) + list(meta.get("secrets_skipped_by_content") or [])
+    return sorted(set(str(n) for n in names))
+
+
+def withheld_note(names: List[str]) -> str:
+    """Said to the model AND recorded in the result. "Not reviewed" must never be
+    indistinguishable from "reviewed and clean": the filter errs toward withholding, and
+    ordinary prose that starts with a short word for a round of work, then a colon and a sentence, can look like a password assignment."""
+    if not names:
+        return ""
+    shown = ", ".join(names[:30]) + (f" (+{len(names) - 30} more)" if len(names) > 30 else "")
+    return ("\n\n[NOTE from the harness: the secret filter withheld these files from your view: "
+            f"{shown}. They exist; do not conclude anything about their content.]")
+
+
+def pack_scope(scope: str, max_input_tokens: int) -> Tuple[str, List[str]]:
     """Context goes through pack_context.py — the SAME secret filter every review uses."""
     if not Path(scope).is_dir():
         raise Bad(f"--scope is not a directory: {scope}")
     with tempfile.TemporaryDirectory(prefix="bcoc.pack.") as td:
-        out = Path(td) / "pack.txt"
+        out, meta_f = Path(td) / "pack.txt", Path(td) / "meta.json"
         r = subprocess.run([sys.executable, str(SCRIPTS / "pack_context.py"), scope,
-                            "--max-input-tokens", str(max_input_tokens), "--out", str(out)],
+                            "--max-input-tokens", str(max_input_tokens), "--out", str(out),
+                            "--meta-out", str(meta_f)],
                            capture_output=True, text=True, timeout=300)
         if r.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             raise Bad("packing --scope failed or produced nothing: " + redact(r.stderr)[:300])
-        return out.read_text(encoding="utf-8", errors="replace")
+        try:
+            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        return out.read_text(encoding="utf-8", errors="replace"), withheld_names(meta)
 
 
 def pdf_text(path: str) -> str:
@@ -357,6 +379,7 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
 
     run_dir = Path(tempfile.mkdtemp(prefix="bcoc.deleg."))
     os.chmod(run_dir, 0o700)
+    withheld: List[str] = []
     try:
         # the agent runs in a filtered mirror of the scope, never the raw tree
         cwd = run_dir / "mirror"
@@ -365,6 +388,11 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
                                 "--mirror-to", str(cwd)], capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
                 return "ERROR", {"error": "could not build a filtered mirror: " + redact(r.stderr)[:300]}
+            try:
+                withheld = withheld_names(json.loads(r.stdout))
+            except ValueError:
+                withheld = []
+            prompt_text += withheld_note(withheld)
         else:
             cwd.mkdir()
         env = child_env(pid)
@@ -432,7 +460,7 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
             return res, {"error": (err.strip() or "opencode returned no text")[:800],
                          "model": f"{pid}/{model}"}
         return "OK", {"content": redact(text), "model": f"{pid}/{model}", "finish_reason": "stop",
-                      "usage": {}, "denied_tool_calls": tool_errs}
+                      "usage": {}, "denied_tool_calls": tool_errs, "withheld": withheld}
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
@@ -445,8 +473,12 @@ def write_result(path: Path, role: str, model: str, backend: str, result: str,
     head = ["---", f"role: {role}", f"model: {model}", f"backend: {backend}",
             f"result: {result}", f"finish_reason: {env.get('finish_reason')}",
             f"tokens: {usage.get('total_tokens')}", f"session: {session or ''}",
-            f"created: {_utc_stamp()}", "---", ""]
+            f"withheld_files: {len(env.get('withheld') or [])}", f"created: {_utc_stamp()}", "---", ""]
     body = env.get("content") or ""
+    if env.get("withheld"):
+        names = ", ".join(f"`{n}`" for n in env["withheld"][:30])
+        body = ("> [!NOTE]\n> The secret filter withheld these files from the model, so they were "
+                f"**not reviewed**: {names}.\n\n") + body
     if result not in ("OK", "TRUNCATED") and env.get("error"):
         body = f"> [!WARNING]\n> {redact(str(env['error']))[:1500]}\n\n{body}"
     elif result == "TRUNCATED":
@@ -514,6 +546,7 @@ def finish(result: str, out_path: Optional[Path] = None, model: str = "") -> int
 def main(argv: Optional[List[str]] = None) -> int:
     a = build_parser().parse_args(argv)
     state = ledger.state_dir()
+    scope_withheld: List[str] = []
     try:
         if a.session is not None and not SESSION_RE.match(a.session):
             raise Bad("--session must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -553,7 +586,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"is now being sent to {pid}/{model}.", file=sys.stderr)
         user_text = prompt
         if a.scope and a.backend == "or-api":
-            user_text += "\n\n=== PROJECT CONTEXT ===\n" + pack_scope(a.scope, a.max_input_tokens)
+            packed, scope_withheld = pack_scope(a.scope, a.max_input_tokens)
+            user_text += "\n\n=== PROJECT CONTEXT ===\n" + packed + withheld_note(scope_withheld)
         for pdf in a.pdf:
             user_text += f"\n\n=== PDF: {Path(pdf).name} ===\n" + pdf_text(pdf)
         images = [image_part(p) for p in a.image]
@@ -610,6 +644,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             break
         print(f"bcoc: {full} -> {result}; trying {attempts[i + 1][0]}/{attempts[i + 1][1]}", file=sys.stderr)
 
+    if scope_withheld and not final_env.get("withheld"):
+        final_env = {**final_env, "withheld": scope_withheld}
+    if final_env.get("withheld"):
+        print(f"bcoc: NOTE — the secret filter withheld {len(final_env['withheld'])} file(s) from the "
+              f"model: {', '.join(final_env['withheld'][:8])}"
+              f"{' …' if len(final_env['withheld']) > 8 else ''}. They were NOT reviewed.", file=sys.stderr)
     write_result(out_path, a.role, final_model, a.backend, final_result, final_env, a.session)
     secret_scan(out_path)
     if a.json_out:
@@ -618,6 +658,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     "result": final_result,
                                     "usage": final_env.get("usage"),
                                     "finish_reason": final_env.get("finish_reason"),
+                                    "withheld": final_env.get("withheld") or [],
                                     "error": redact(str(final_env.get("error") or "")) or None,
                                     "out": str(out_path)}, indent=2), encoding="utf-8")
         os.chmod(side, 0o600)

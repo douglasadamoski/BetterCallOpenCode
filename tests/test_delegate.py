@@ -566,3 +566,28 @@ def test_garbage_numeric_env_does_not_crash(monkeypatch):
     monkeypatch.setenv("BCOPENCODE_CAP", "lots")
     monkeypatch.setenv("BCOPENCODE_TIMEOUT", "")
     assert dg.build_parser().parse_args(["--role", "analyst", "--prompt-file", "x"]).cap == 200
+
+
+# ----------------------------------------------------------------------------- withheld files are never silent
+def test_files_the_secret_filter_withheld_are_reported_and_told_to_the_model(h):
+    scope = h.tmp / "proj2"
+    scope.mkdir()
+    (scope / "ok.py").write_text("x = 1\n")
+    # ordinary prose that reads as a password assignment: the filter errs toward withholding
+    (scope / "notes.md").write_text("First " + "pa" + "ss: 8/10 in 18.5 min (10 workers, 5 at a time); reran them\n")  # assembled: see test_pack_secrets
+    h.run("--role", "reviewer", "--model", FREE, "--scope", str(scope), "--out", str(h.tmp / "r.md"))
+    sent = json.dumps(h.sent[0]["body"])
+    assert "notes.md" in sent and "withheld" in sent            # the model is told it exists and was withheld
+    assert "8/10 in 18.5" not in sent                           # ...and still does not see it
+    body = (h.tmp / "r.md").read_text()
+    assert "withheld_files: 1" in body and "not reviewed" in body and "notes.md" in body
+    assert "withheld the" in h.err or "withheld 1" in h.err
+
+
+def test_no_withheld_note_when_nothing_was_withheld(h):
+    scope = h.tmp / "proj3"
+    scope.mkdir()
+    (scope / "ok.py").write_text("x = 1\n")
+    h.run("--role", "reviewer", "--model", FREE, "--scope", str(scope), "--out", str(h.tmp / "r.md"))
+    assert "withheld_files: 0" in (h.tmp / "r.md").read_text()
+    assert "NOTE from the harness" not in json.dumps(h.sent[0]["body"])
