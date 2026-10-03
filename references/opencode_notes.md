@@ -364,3 +364,16 @@ call can answer empty, so probes use a stable directory and retry once, and `fan
 and verifies **one** mirror per (role, scope) for all its units. Do not
 `pkill -f 'opencode run'` from a shell whose own command line contains that text — it kills the
 shell.
+
+**A restart helps, but multi-step research units still stalled (measured the same day).** After
+`opencode service restart` a plain call answered in 1 s and `fanout.py` resumed a 36-unit web-research
+job at parallelism 4. Over 30 minutes 5 more units finished and 22 attempts went silent for the full
+150 s stall limit (their resume-to-finish attempts stalled too), while one-step tasks kept working.
+A direct test showed a `websearch` tool call itself completing in ~2 s and the model's *next* turn
+then hanging — so the stalls were at the model call that follows a tool result, not in the web tool.
+Cause not established (provider queueing under token load is the likeliest). Practical rules:
+- research units with web tools: parallelism **1–2** per provider and `stall_timeout` ≥ 300;
+- after aborting a run, **wait ~1–2 minutes** before judging the provider: the service keeps
+  working through the sessions you abandoned, and a plain call made in that window hangs
+  (observed: 70 s of silence that cleared on its own);
+- `opencode service restart` clears a wedged service, and it is a machine-wide action.
