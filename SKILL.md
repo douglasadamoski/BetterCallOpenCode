@@ -393,7 +393,8 @@ unit; and on Ctrl-C/SIGTERM in-flight units are killed and recorded `INTERRUPTED
 
 **Limits to respect** (measured; see `references/opencode_notes.md`, "Running many sessions"):
 - Parallelism starts at 2 (`--start-parallel`) and is capped by `--max-parallel`. For research units with
-  web tools keep the ceiling at **2** and `stall_timeout` ≥ 300 (4 in flight stalled ~80 % of the time).
+  web tools use **`--max-parallel 1`** with `stall_timeout` ≥ 300 on the provider tested (one alone
+  took ~2.3 min; 2–4 in flight stalled most of the time) and raise it only if you see clean runs.
   For one-step units 6–12 per provider is fine. 25–100 concurrent sessions degraded the provider
   for ~10 minutes (afterwards even a lone call returned nothing for a while). Throughput rose only
   sublinearly (0.18 → 0.32 → 0.40 units/s at 3 → 8 → 16), and wall time is set by the slowest call.

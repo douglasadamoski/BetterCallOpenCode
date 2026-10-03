@@ -372,7 +372,10 @@ job at parallelism 4. Over 30 minutes 5 more units finished and 22 attempts went
 A direct test showed a `websearch` tool call itself completing in ~2 s and the model's *next* turn
 then hanging — so the stalls were at the model call that follows a tool result, not in the web tool.
 Cause not established (provider queueing under token load is the likeliest). Practical rules:
-- research units with web tools: parallelism **1–2** per provider and `stall_timeout` ≥ 300;
+- research units with web tools: parallelism **1** per provider and `stall_timeout` ≥ 300. Measured
+  afterwards on the same account: a lone research unit (web search + fetch) finished in 137 s with
+  a largest silent gap of 47 s, while with 2–4 such sessions in flight most attempts stalled (a run
+  at 2 cut itself to 1 after the first stall and finished 1 of 4 attempts in 30 minutes);
 - after aborting a run, **wait ~1–2 minutes** before judging the provider: the service keeps
   working through the sessions you abandoned, and a plain call made in that window hangs
   (observed: 70 s of silence that cleared on its own);
