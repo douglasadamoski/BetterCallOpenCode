@@ -318,3 +318,49 @@ against a stub `opencode`; it was not re-measured on a real 1.x binary for this 
 `opencode_review.sh` itself remains an **OpenRouter** review wrapper: it normalises every
 model to `openrouter/<id>` and applies the `:free` gate. To review through another provider's
 model, use `delegate.py --role reviewer --backend opencode --scope DIR`.
+
+## Running many sessions (measured on 2.0.22, 2026-10-03)
+
+Findings from driving hundreds of opencode sessions through `fanout.py`. The numbers describe one
+provider on one afternoon — treat them as shapes, not constants.
+
+**Events stream live.** `opencode run --format json` prints one JSON line per event as it
+happens (`step_start`, `tool_use`, `text`, `step_finish`), each carrying `sessionID`. That is what
+makes a stall watchdog possible, and `-s <sessionID>` resumes that session **with its context**
+(a resumed session recalled a code word from its first turn). `delegate.py` uses both: it kills a
+session that has been silent for `--stall-timeout`, then resumes it and asks for the report from
+what it already found (`RESULT=TRUNCATED`, `salvaged: True`). Seen working on a real session.
+
+**Provider failures arrive as `{"type":"error"}` events and the process still exits 0.** Fields:
+`error.status`, `error.type`, `error.message`. Ignoring them turns every provider failure into
+"returned no text". `delegate.py` now maps 401/403 → `AUTH`, 402/429 → `QUOTA`, 5xx →
+`UNREACHABLE`, anything else → `ERROR`, with the provider's own message in the result.
+
+**Zen free models refuse custom agents.** `opencode/*-free` models answer 403
+(`OpenCode's free tier can only be used from within OpenCode`) when the run uses a *custom* agent
+— ours, `bcoc-<role>` — but work with the built-in agents (`build`, `plan`) from the same
+directory. Removing the agent's custom prompt did not help. So the restricted agent this skill
+needs cannot use the Zen free tier; use another provider (OpenRouter `:free`, or a provider you
+configured). The failure is immediate and now reported as `AUTH` with that message.
+
+**Latency has a heavy tail, so wall time is set by the slowest call, not the average.** Trivial
+tasks ("reply PONG") on one provider: median 2–5 s, but ~5–8 % of calls took 40–125 s, with gaps
+of up to ~86 s *between events of a call that then succeeded*. Consequences:
+- a stall timeout below ~90–120 s kills calls that would have finished; for real research
+  units use 150–300 s;
+- 40 trivial units at parallelism 16 took 100 s — about the slowest call — so batches of small
+  units are tail-bound, not throughput-bound;
+- throughput rose only sublinearly with parallelism: 0.18 units/s at 3, 0.32 at 8, 0.40 at 16.
+
+**Pushing to 25–100 concurrent sessions degraded the provider for ~10 minutes.** Runs at
+parallelism 25 were slower per call than runs at 10; afterwards every call to that provider
+(and, briefly, others via the same service) returned nothing within 75 s until the load had been
+off for several minutes. Killing a client does **not** cancel its session on the server, so
+abandoned sessions keep occupying it. Keep parallelism modest (6–12 per provider worked cleanly)
+and let `fanout.py`'s adaptive limiter react to rate-limit answers.
+
+**Housekeeping.** A new working directory is a new "project": its first `models`/`debug agents`
+call can answer empty, so probes use a stable directory and retry once, and `fanout.py` prepares
+and verifies **one** mirror per (role, scope) for all its units. Do not
+`pkill -f 'opencode run'` from a shell whose own command line contains that text — it kills the
+shell.

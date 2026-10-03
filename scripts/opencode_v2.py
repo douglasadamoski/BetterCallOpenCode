@@ -207,6 +207,38 @@ def parse_events(out: str) -> Tuple[str, List[str]]:
     return "".join(texts).strip(), errs
 
 
+def parse_errors(out: str) -> List[Dict[str, Any]]:
+    """`{"type":"error","error":{"type","message","status"}}` events: how opencode reports a
+    PROVIDER failure (bad credential, rate limit, upstream down). Without reading them every
+    such failure collapsed into the useless "returned no text". Messages are truncated and the
+    caller redacts them."""
+    errs: List[Dict[str, Any]] = []
+    for line in out.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(o, dict) and o.get("type") == "error" and isinstance(o.get("error"), dict):
+            e = o["error"]
+            st = e.get("status")
+            errs.append({"status": st if isinstance(st, int) else None,
+                         "kind": str(e.get("type") or "")[:60], "message": str(e.get("message") or "")[:300]})
+    return errs
+
+
+def classify_provider_error(err: Dict[str, Any]) -> str:
+    """RESULT word for one provider error event. 402/429 are quota; 401/403 are credential or
+    policy (AUTH: do not retry the same model); 5xx is the provider being down (UNREACHABLE)."""
+    st, low = err.get("status"), (err.get("message") or "").lower()
+    if st in (402, 429) or "rate limit" in low or "quota" in low or "too many requests" in low:
+        return "QUOTA"
+    if st in (401, 403) or "unauthor" in low or "api key" in low:
+        return "AUTH"
+    if isinstance(st, int) and st >= 500:
+        return "UNREACHABLE"
+    return "ERROR"
+
+
 def run_env() -> Dict[str, str]:
     """Environment for the real run AND the verification — they must match. Project config
     is deliberately NOT disabled: the mirror's opencode.json is this skill's own."""

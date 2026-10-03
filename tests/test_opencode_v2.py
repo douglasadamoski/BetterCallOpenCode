@@ -118,3 +118,16 @@ def test_narration_before_tool_calls_is_not_part_of_the_answer():
 def test_a_run_with_no_tool_calls_keeps_all_text():
     lines = [{"type": "text", "part": {"text": "A"}}, {"type": "text", "part": {"text": "B"}}]
     assert ov2.parse_events("\n".join(json.dumps(x) for x in lines))[0] == "AB"
+
+
+def test_provider_error_events_are_read_not_ignored():
+    out = json.dumps({"type": "error", "error": {"type": "provider.auth", "message": "free tier only inside OpenCode", "status": 403}})
+    errs = ov2.parse_errors(out + "\nnot json\n" + json.dumps({"type": "text", "part": {"text": "x"}}))
+    assert errs == [{"status": 403, "kind": "provider.auth", "message": "free tier only inside OpenCode"}]
+
+
+@pytest.mark.parametrize("status,msg,word", [
+    (403, "forbidden", "AUTH"), (401, "bad key", "AUTH"), (429, "slow down", "QUOTA"), (402, "credits", "QUOTA"),
+    (None, "Rate limit exceeded", "QUOTA"), (503, "upstream down", "UNREACHABLE"), (400, "bad request", "ERROR"), (None, "weird", "ERROR")])
+def test_provider_errors_map_to_the_result_vocabulary(status, msg, word):
+    assert ov2.classify_provider_error({"status": status, "message": msg}) == word

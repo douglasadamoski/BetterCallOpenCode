@@ -10,7 +10,7 @@
       "displayName": "BetterCallOpenCode",
       "description": "Delegate code reviews and research tasks to free OpenRouter models (or any provider connected to OpenCode) as independent workers; Claude triages and implements. Free-only by default.",
       "source": "./",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": {
         "name": "Douglas Adamoski",
         "url": "https://github.com/douglasadamoski"

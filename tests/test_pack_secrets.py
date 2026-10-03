@@ -121,7 +121,10 @@ def test_packer_does_not_refuse_its_own_source():
     a failure that is invisible without this assertion.
     """
     repo = SCRIPTS.parent
-    _body, meta = pack_context.pack(repo, max_input_tokens=80000)
+    # The budget is generous on purpose: this test is about the SECRET FILTER refusing the repo's own
+    # files, and an exhausted packing budget (the repo has outgrown 80k tokens) looks identical in
+    # `included` while meaning something else entirely.
+    _body, meta = pack_context.pack(repo, max_input_tokens=400000)
     included = {i["path"] for i in meta["included"]}
     for critical in (
         "scripts/pack_context.py",

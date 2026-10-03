@@ -156,6 +156,20 @@ stated here because an unstated assumption is indistinguishable from an oversigh
   from OpenCode's `auth.json`, or from a user-owned config file, and it is sent to
   OpenRouter in an `Authorization` header. Rotate it if any of those are exposed.
 
+### 8. The orchestrator (v1.2)
+
+- **`fanout.py` runs many model sessions with your credentials and your daily quota.** The cap is
+  checked once for the whole job and enforced in every unit; it is still check-then-act across
+  processes. A bad spec can queue hundreds of requests — use `plan` first.
+- **Worker output is untrusted and travels.** `{{result:ID}}` / `{{results:PREFIX}}` paste one
+  model's text into another's prompt. It is fenced and labelled as data, which is mitigation, not
+  immunity: a worker that read a hostile page can still try to steer a later worker. Do not feed
+  worker output into a unit that has more privileges than the one that produced it.
+- **Killing a client does not cancel its server-side session.** After an interrupt, in-flight
+  sessions may keep running inside opencode's background service and consume provider quota.
+- **Run directories hold prompts and full results** (mode 0700 at the top level); treat them like
+  review reports.
+
 ### 7. Providers, delegated workers and the capability cache (v1.1)
 
 - **Discovery makes outbound requests.** `discover_providers.py` calls each provider's own

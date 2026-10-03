@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -591,3 +592,219 @@ def test_no_withheld_note_when_nothing_was_withheld(h):
     h.run("--role", "reviewer", "--model", FREE, "--scope", str(scope), "--out", str(h.tmp / "r.md"))
     assert "withheld_files: 0" in (h.tmp / "r.md").read_text()
     assert "NOTE from the harness" not in json.dumps(h.sent[0]["body"])
+
+
+# ----------------------------------------------------------------------------- streaming, stall watchdog, salvage
+STREAM_STUB = textwrap.dedent("""\
+    #!/bin/bash
+    echo "$@" >> "$OPENCODE_STUB_LOG"
+    case "$1" in
+      --version) echo "v2.0.22" ;;
+      debug) cat "$OPENCODE_STUB_AGENTS" ;;
+      models|auth) echo "STUB-DISCOVERY-CALLED" >> "$OPENCODE_STUB_LOG.disc" ;;
+      run)
+        resumed=0; for a in "$@"; do [ "$a" = "-s" ] && resumed=1; done
+        if [ $resumed = 1 ]; then
+          if [ "$OPENCODE_STUB_RESUME" = "stall" ]; then
+            echo '{"type":"step_start","sessionID":"ses_stub1","part":{}}'; sleep 30
+          fi
+          echo '{"type":"text","sessionID":"ses_stub1","part":{"text":"SALVAGED REPORT"}}'
+        else
+          echo '{"type":"step_start","sessionID":"ses_stub1","part":{}}'
+          case "$OPENCODE_STUB_MODE" in
+            stall) echo '{"type":"text","sessionID":"ses_stub1","part":{"text":"half a thought"}}'; sleep 30 ;;
+            drip) for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                    echo '{"type":"tool_use","sessionID":"ses_stub1","part":{"state":{"status":"completed"}}}'; sleep 0.5
+                  done
+                  echo '{"type":"text","sessionID":"ses_stub1","part":{"text":"late"}}' ;;
+            *) echo '{"type":"text","sessionID":"ses_stub1","part":{"text":"normal answer"}}' ;;
+          esac
+        fi ;;
+    esac
+""")
+
+
+@pytest.fixture
+def stream(stub, monkeypatch):
+    (stub.tmp / "bin" / "opencode").write_text(STREAM_STUB)
+    monkeypatch.delenv("OPENCODE_STUB_MODE", raising=False)
+    monkeypatch.delenv("OPENCODE_STUB_RESUME", raising=False)
+    return stub
+
+
+def _run_oc(s, *extra):
+    return s.run("--role", "researcher", "--backend", "opencode", "--cache-only",
+                 "--model", "openrouter/vendor/vision:free", "--out", str(s.tmp / "r.md"), *extra)
+
+
+def test_events_are_read_live_and_the_session_id_and_gaps_are_recorded(stream):
+    assert _run_oc(stream, "--json-out") == "RESULT=OK"
+    side = json.loads((stream.tmp / "r.md.json").read_text())
+    assert side["opencode_session"] == "ses_stub1" and side["max_gap_s"] is not None
+    assert "normal answer" in (stream.tmp / "r.md").read_text()
+
+
+def test_a_stalled_session_is_killed_early_and_resumed_to_write_its_report(stream, monkeypatch):
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "stall")
+    t0 = time.time()
+    assert _run_oc(stream, "--stall-timeout", "2", "--timeout", "60", "--json-out") == "RESULT=TRUNCATED"
+    assert time.time() - t0 < 15, "the watchdog must not wait for the 30 s hang or the 60 s total"
+    body = (stream.tmp / "r.md").read_text()
+    assert "SALVAGED REPORT" in body and "partial research" in body and "salvaged: True" in body
+    log = stream.log()
+    assert "-s ses_stub1" in log and "Stop researching" in log          # it resumed THAT session
+    assert json.loads((stream.tmp / "r.md.json").read_text())["salvaged"] is True
+    assert stream.rows()[-1]["result"] == "TRUNCATED" and stream.rows()[-1]["billed"] is True
+
+
+def test_no_salvage_gives_timeout_and_keeps_what_was_said(stream, monkeypatch):
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "stall")
+    assert _run_oc(stream, "--stall-timeout", "2", "--no-salvage") == "RESULT=TIMEOUT"
+    body = (stream.tmp / "r.md").read_text()
+    assert "stalled" in body and "half a thought" in body
+    assert "-s ses_stub1" not in stream.log()
+
+
+def test_a_resumed_session_that_also_stalls_ends_as_timeout(stream, monkeypatch):
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "stall")
+    monkeypatch.setenv("OPENCODE_STUB_RESUME", "stall")
+    t0 = time.time()
+    assert _run_oc(stream, "--stall-timeout", "2", "--salvage-timeout", "3") == "RESULT=TIMEOUT"
+    assert time.time() - t0 < 20
+
+
+def test_the_total_timeout_applies_even_while_events_keep_arriving(stream, monkeypatch):
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "drip")            # an event every 0.5 s for 6 s
+    t0 = time.time()
+    assert _run_oc(stream, "--stall-timeout", "5", "--timeout", "2", "--no-salvage") == "RESULT=TIMEOUT"
+    assert time.time() - t0 < 6 and "no answer within 2s" in (stream.tmp / "r.md").read_text()
+
+
+def test_steady_events_do_not_trip_the_stall_watchdog(stream, monkeypatch):
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "drip")
+    assert _run_oc(stream, "--stall-timeout", "3", "--timeout", "30") == "RESULT=OK"
+
+
+def _live_sleepers():
+    out = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True, text=True).stdout.split()
+    found = []
+    for pid in out:
+        try:
+            cmd = open(f"/proc/{pid}/cmdline").read().replace("\0", " ")
+        except OSError:
+            continue
+        if cmd.strip() == "sleep 30":
+            found.append(pid)
+    return found
+
+
+def test_the_killed_process_group_is_really_gone(stream, monkeypatch):
+    before = set(_live_sleepers())
+    monkeypatch.setenv("OPENCODE_STUB_MODE", "stall")
+    _run_oc(stream, "--stall-timeout", "1", "--no-salvage")
+    # the stub's `sleep 30` is a grandchild: it only dies if the whole process group was killed
+    for _ in range(20):
+        mine = set(_live_sleepers()) - before
+        if not mine:
+            break
+        time.sleep(0.25)
+    assert not mine, "the watchdog killed the stub but left its child running"
+
+
+def test_workdir_is_prepared_and_verified_once_and_reused(stream):
+    wd = stream.tmp / "wd"
+    for i in range(3):
+        assert _run_oc(stream, "--workdir", str(wd), "--out", str(stream.tmp / f"r{i}.md")) == "RESULT=OK"
+    assert stream.log().count("debug agents") == 1, "verification must happen once per prepared workdir"
+    assert (wd / ".bcoc_ready.json").is_file() and (wd / "opencode.json").is_file()
+
+
+def test_changing_the_scope_rebuilds_the_workdir(stream):
+    wd = stream.tmp / "wd"
+    s1, s2 = stream.tmp / "s1", stream.tmp / "s2"
+    for d, name in ((s1, "one.py"), (s2, "two.py")):
+        d.mkdir()
+        (d / name).write_text("x = 1\n")
+    _run_oc(stream, "--workdir", str(wd), "--scope", str(s1), "--out", str(stream.tmp / "a.md"))
+    assert (wd / "one.py").exists()
+    _run_oc(stream, "--workdir", str(wd), "--scope", str(s2), "--out", str(stream.tmp / "b.md"))
+    assert (wd / "two.py").exists() and not (wd / "one.py").exists()
+    assert stream.log().count("debug agents") == 2
+
+
+def test_prepare_only_spends_nothing_and_needs_no_prompt(stream):
+    p = stream.tmp / "wd2"
+    out = stream.run("--role", "analyst", "--backend", "opencode", "--cache-only", "--prepare-only",
+                     "--model", "openrouter/vendor/vision:free", "--workdir", str(p))
+    assert out == "RESULT=OK" and (p / ".bcoc_ready.json").is_file()
+    assert "run " not in stream.log() and stream.rows() == []
+
+
+def test_prepare_only_refuses_an_unrestricted_agent(stream):
+    (stream.tmp / "agents.json").write_text(json.dumps(agent(rules(("*", "*", "allow")), "bcoc-researcher")))
+    out = stream.run("--role", "researcher", "--backend", "opencode", "--cache-only", "--prepare-only",
+                     "--model", "openrouter/vendor/vision:free", "--workdir", str(stream.tmp / "wd3"))
+    assert out == "RESULT=REFUSED" and not (stream.tmp / "wd3" / ".bcoc_ready.json").exists()
+
+
+def test_cache_only_runs_no_discovery_calls(stream):
+    _run_oc(stream)
+    assert not (stream.tmp / "stub.log.disc").exists()
+
+
+def test_a_ready_marker_from_a_different_agent_is_not_trusted(stream):
+    wd = stream.tmp / "wd4"
+    _run_oc(stream, "--workdir", str(wd), "--out", str(stream.tmp / "a.md"))
+    stream.run("--role", "analyst", "--backend", "opencode", "--cache-only", "--model", "openrouter/vendor/vision:free",
+               "--workdir", str(wd), "--out", str(stream.tmp / "b.md"))
+    assert stream.log().count("debug agents") == 2
+
+
+def test_two_processes_meeting_an_unbuilt_workdir_do_not_clobber_each_other(stream):
+    """Both run the real delegate.py against one fresh --workdir at once; the lock serialises the build."""
+    wd = stream.tmp / "race"
+    scope = stream.tmp / "rscope"
+    scope.mkdir()
+    (scope / "a.py").write_text("x = 1\n")
+    env = {**os.environ}
+    cmd = [sys.executable, str(ROOT / "scripts" / "delegate.py"), "--role", "researcher", "--backend", "opencode",
+           "--cache-only", "--model", "openrouter/vendor/vision:free", "--workdir", str(wd), "--scope", str(scope),
+           "--prompt-file", str(stream.prompt)]
+    ps = [subprocess.Popen(cmd + ["--out", str(stream.tmp / f"race{i}.md")], stdout=subprocess.PIPE, text=True, env=env)
+          for i in range(4)]
+    outs = [p.communicate(timeout=60)[0].strip().splitlines()[-1] for p in ps]
+    assert outs == ["RESULT=OK"] * 4
+    assert stream.log().count("debug agents") == 1, "only the first process may build and verify"
+
+
+@pytest.mark.parametrize("status,word", [(403, "AUTH"), (429, "QUOTA"), (502, "UNREACHABLE")])
+def test_an_opencode_error_event_becomes_the_matching_result_word_with_its_real_message(stream, monkeypatch, status, word):
+    err = json.dumps({"type": "error", "sessionID": "ses_stub1", "error": {"type": "provider.x", "message": "the provider said no", "status": status}})
+    (stream.tmp / "bin" / "opencode").write_text(STREAM_STUB.replace(
+        "*) echo '{\"type\":\"text\",\"sessionID\":\"ses_stub1\",\"part\":{\"text\":\"normal answer\"}}' ;;",
+        "*) echo '" + err + "' ;;"))
+    assert _run_oc(stream) == f"RESULT={word}"
+    body = (stream.tmp / "r.md").read_text()
+    assert "the provider said no" in body and str(status) in body and "returned no text" not in body
+
+
+def test_sigterm_kills_the_opencode_child_removes_the_temp_dir_and_records_the_row(stream, monkeypatch):
+    """The opencode child runs in its own process group: killing delegate.py alone would orphan it."""
+    import glob
+    import signal as _sig
+    env = {**os.environ, "OPENCODE_STUB_MODE": "stall"}
+    before = set(glob.glob("/tmp/bcoc.deleg.*"))
+    cmd = [sys.executable, str(ROOT / "scripts" / "delegate.py"), "--role", "researcher", "--backend", "opencode",
+           "--cache-only", "--model", "openrouter/vendor/vision:free", "--prompt-file", str(stream.prompt),
+           "--out", str(stream.tmp / "sig.md"), "--stall-timeout", "60", "--timeout", "120"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, env=env)
+    time.sleep(3)                                   # let it start the stub, which sleeps 30 s
+    assert any("sleep 30" in open(f"/proc/{x}/cmdline").read().replace("\0", " ") for x in
+               subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True, text=True).stdout.split()
+               if os.path.exists(f"/proc/{x}/cmdline"))
+    p.send_signal(_sig.SIGTERM)
+    out = p.communicate(timeout=15)[0]
+    assert p.returncode == 130 and "RESULT=INTERRUPTED" in out
+    time.sleep(0.5)
+    assert set(glob.glob("/tmp/bcoc.deleg.*")) - before == set(), "the run directory must be removed"
+    assert stream.rows()[-1]["result"] == "INTERRUPTED" and stream.rows()[-1]["billed"] is True

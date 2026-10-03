@@ -8,6 +8,37 @@ The **RESULT contract** — the last stdout line of every entrypoint — is the 
 this skill. Adding a word to it, or changing what an existing word means, is a breaking
 change.
 
+## [1.2.0] — 2026-10-03
+
+Claude as the orchestrator, opencode models as many small workers.
+
+### Added
+- `scripts/fanout.py` — run a job of tens to hundreds of **units** as separate opencode sessions:
+  parallel with per-run and per-model limits, dependency order with `{{result:ID}}` /
+  `{{results:PREFIX}}` (worker output is passed on fenced as untrusted data), `each_model` for
+  cross-checking, retries that rotate through a model pool, a model dropped after repeated `AUTH`,
+  adaptive parallelism (a rate-limit answer halves it, successes restore it), one prepared and
+  verified mirror per (role, scope), a manifest with `--resume`, a daily-cap check for the whole
+  job, and `INDEX.md` / `ALL_RESULTS.md` so the orchestrator reads every result at once.
+- `delegate.py`: a **stall watchdog** (`--stall-timeout`) on the live event stream, in addition to the
+  total timeout; on a kill the session is **resumed** (`-s`) and asked to write its report from what
+  it found (`TRUNCATED`, `salvaged`); `--workdir` / `--prepare-only` to share a verified mirror;
+  `--cache-only` so hundreds of units do not each re-run discovery; SIGTERM/SIGINT kill the opencode
+  child and remove the run directory; session id, elapsed time and largest event gap are recorded.
+- opencode `error` events are now read: 401/403 → `AUTH`, 402/429 → `QUOTA`, 5xx → `UNREACHABLE`,
+  with the provider's own message, instead of "returned no text".
+
+### Found by testing the limits (details in `references/opencode_notes.md`)
+- Shipped bugs the tests caught: units that arrived while the shared mirror was being built skipped
+  it; the first attempt of every unit went to the first model in a pool; the cap given to the
+  orchestrator was never passed to the units (each fell back to 200); an interrupt waited for
+  in-flight units instead of killing them; killing `delegate.py` orphaned its opencode child.
+- Real runs: 5 units / 30 units / 100 units at parallelism 5 / 10 / 25 completed; a 36-unit
+  web-research job did **not**: the provider stopped answering (one `step_start`, then silence, even
+  for a plain call outside the harness), the orchestrator detected the stalls, retried, rotated models
+  and blocked the dependents correctly, and the run was stopped by hand. Keep parallelism at 6–12.
+- The `opencode/*-free` (Zen) models refuse custom agents with a 403.
+
 ## [1.1.0] — 2026-10-02
 
 Adds provider discovery, a capability cache, model selection and delegated workers. The

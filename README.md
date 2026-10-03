@@ -210,6 +210,14 @@ python3 scripts/delegate.py --role researcher --model auto \
   --prompt-file task.md --out result.md --fallback auto
 ```
 
+**Let Claude orchestrate many opencode sessions** — split a job into units, run them in parallel
+as separate sessions, get everything back in one place to compare (see SKILL.md, Mode F):
+
+```bash
+python3 scripts/fanout.py run units.json --run-dir runs/r1 --max-parallel 8   # INDEX.md, ALL_RESULTS.md
+python3 scripts/fanout.py run units.json --run-dir runs/r1 --resume           # redo only what failed
+```
+
 Multi-model panel, parallel under the free 20 RPM limit:
 
 ```bash
@@ -257,6 +265,8 @@ scripts/discover_providers.py       # providers/models/capabilities -> capabilit
 scripts/select_models.py            # rank / pick models for a task from that cache
 scripts/delegate.py                 # run one task on any provider's model as a worker
 scripts/ledger.py                   # ledger + shared RPM window for Python callers
+scripts/fanout.py                   # run hundreds of units as separate opencode sessions; manifest, resume
+scripts/opencode_v2.py              # the restricted agent on opencode 2.x: write, verify, parse events
 agents/bcoc-review.md               # the OpenCode critic agent (mode: all + deny blocks)
 agents/bcoc-research.md             # opencode 1.x researcher agent (web allowed, no edit/shell)
 agents/bcoc-delegate.md             # Claude Code subagent: dispatches one delegate.py call
