@@ -8,7 +8,10 @@ description: >-
   free rate limits. Use when the user says "better call opencode", "review with
   free OpenRouter", "multi free models", "Nemotron free review", or wants a second
   opinion from OpenCode/OpenRouter without spending credits unless they explicitly
-  ask for paid models.
+  ask for paid models. Also use as a deep-research subagent: when a job needs many
+  sources or long documents ("deep research", "research this in depth", "read these
+  papers", "cross-check with other models"), split it into small search/read units and
+  run them as separate opencode sessions so the bulk text stays out of Claude's context.
 ---
 
 # BetterCallOpenCode
@@ -340,6 +343,13 @@ or follow links from a result without checking them yourself.
 > `references/opencode_notes.md`, "opencode 2.x". `--agent` is not accepted on 2.x.
 
 ## Mode F — Orchestrate (you are the mastermind; opencode models are the hands)
+
+> **This is the deep-research-subagent mode, and its point is to save your context.** The workers read
+> pages and search results; you read only the condensed answers. Keep it that way: use
+> `wait --max-chars`, read `INDEX.md` before `ALL_RESULTS.md`, compress with `analyze` units, and verify
+> only the claims the answer rests on. Worker tokens are not yours (measured on one run: ~349k worker
+> tokens vs ~15k of result text to read); your own planning and verification tokens still are.
+> The README section "Use it as a deep-research subagent" has the recipe and the honest limits.
 
 Mode E runs one worker. Mode F is for a job you can split into many independent **units** —
 tens to hundreds — where YOU decompose, opencode models do the units (each its own opencode

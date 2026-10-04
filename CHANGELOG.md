@@ -8,9 +8,14 @@ The **RESULT contract** — the last stdout line of every entrypoint — is the 
 this skill. Adding a word to it, or changing what an existing word means, is a breaking
 change.
 
-## [1.2.0] — 2026-10-03
+## [1.2.0] — 2026-10-04
 
 Claude as the orchestrator, opencode models as many small workers.
+
+### Documentation
+- README: "Use it as a deep-research subagent" — how to keep the bulk text out of Claude's context, the
+  recipe, the levers, and a measured token comparison with its limits stated (worker side only; Claude's
+  own planning and verification were not measured). SKILL.md description and Mode F updated to match.
 
 ### Added
 - `scripts/fanout.py` — run a job of tens to hundreds of **units** as separate opencode sessions:

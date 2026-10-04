@@ -76,6 +76,66 @@ bash scripts/opencode_review.sh --preflight --scope .
 
 …or say *"better call opencode on this folder"*, *"multi free model review"*, *"Nemotron free critique"*.
 
+## Use it as a deep-research subagent (keep the bulk text out of Claude's context)
+
+Deep research is mostly **reading**: search results, fetched pages, long documents. All of that text
+normally lands in Claude's context and is paid for in Claude tokens. With this plugin the reading
+happens inside **opencode sessions on other models**; Claude only plans, reads the *condensed* results,
+checks the claims that matter, and writes the answer.
+
+```
+ Claude (planner · verifier · writer)                      opencode models (readers)
+   │  writes small units  ──────────────────────────────►   search: 1 query  → 5–8 URLs + snippets
+   │  (fanout.py add)                                       read:   1 URL    → answer + exact quotes
+   │  reads only results  ◄──────────────────────────────   analyze: compare / compress, no tools
+   │  (fanout.py wait --max-chars)                          (each its own session, 2 at a time)
+   └─ decides the next wave · spot-checks claims at the source · writes the synthesis
+```
+
+**Where the tokens go** (measured on one live run — 16 units, 25 worker sessions including 8 that stalled
+and were retried):
+
+| | Tokens |
+|---|---|
+| Consumed by the opencode workers (page and search text, reasoning) | ~349,000 (301,000 input) |
+| Result text Claude would read if it opened every result in full | ~14,700 |
+
+So roughly **24× more text was read by the workers than by Claude**. Read that number correctly:
+it is the worker side; it is a proxy for what would otherwise have entered Claude's context, not a
+measured saving. What Claude still spends — planning, writing the unit specs, reading the condensed
+results, and **verifying** — was not measured, and verification is not optional: a worker's output
+is a claim. Retries and stalled attempts burn the *worker* provider's quota, not Claude's (here 25
+sessions for 16 units).
+
+**The recipe**
+
+1. *Plan* (Claude): split the question into narrow sub-questions. One question or one source per unit.
+2. `fanout.py start spec0.json --run-dir runs/r1 --max-parallel 2` — a live scheduler in the background.
+3. `fanout.py add runs/r1 wave1.json` with `search` units, then
+   `fanout.py wait runs/r1 --ids … --max-chars 1500` — Claude reads only the first part of each result.
+4. *Decide* (Claude): pick the pages worth opening, add `read` units (on both models if you want to
+   cross-check), then `analyze` units that compare the two readers' answers.
+5. `fanout.py close runs/r1` — then verify the few claims the answer depends on directly at their source,
+   and write the synthesis.
+
+**Levers that keep Claude's usage low**
+
+- `wait --max-chars N` and `--no-body`: print a trimmed result, or just what finished; open the full
+  `units/<id>/result.md` only when needed.
+- Read `INDEX.md` first (one row per unit), `ALL_RESULTS.md` only for the final cross-comparison.
+- Use `analyze` units to *compress* — "compare these two answers in 150 words" — before Claude reads anything.
+- Keep units small (the `search`/`read` shapes): they are fast, their output is short by construction, and
+  a stall costs one small step.
+- Ask workers for a compact format (the shapes already do) and cap it; never ask for "everything you found".
+
+**When it is worth it — and when it is not.** Worth it when the job needs many sources or long
+documents, or you want several models to cross-check. Not worth it for one or two quick lookups: Claude's
+own web tools are simpler. Everything the workers say is untrusted data and may be wrong or invented;
+unmeasured claims stay unmeasured until Claude checks them.
+
+Details, flags and the measured limits are in [`SKILL.md`](SKILL.md) (Mode F) and
+[`references/opencode_notes.md`](references/opencode_notes.md).
+
 ## Why
 
 Vendor critics are great until you want **zero marginal cost** multi-model opinions. BetterCallOpenCode

@@ -2,7 +2,7 @@
   "name": "better-call-opencode",
   "displayName": "BetterCallOpenCode",
   "version": "1.2.0",
-  "description": "Delegate code reviews and research tasks to free OpenRouter models (or any provider connected to OpenCode) as independent workers; Claude triages and implements. Free-only by default; provider discovery, capability cache and parallel delegated subagents.",
+  "description": "Use free OpenRouter models (or any provider connected to OpenCode) as independent reviewers and as deep-research subagents: Claude plans and verifies, many small opencode sessions do the reading, so the bulk text stays out of Claude's context. Free-only by default.",
   "author": {
     "name": "Douglas Adamoski",
     "url": "https://github.com/douglasadamoski"

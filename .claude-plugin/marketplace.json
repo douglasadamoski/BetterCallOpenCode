@@ -8,7 +8,7 @@
     {
       "name": "better-call-opencode",
       "displayName": "BetterCallOpenCode",
-      "description": "Delegate code reviews and research tasks to free OpenRouter models (or any provider connected to OpenCode) as independent workers; Claude triages and implements. Free-only by default.",
+      "description": "Use free OpenRouter models (or any provider connected to OpenCode) as independent reviewers and as deep-research subagents: Claude plans and verifies, many small opencode sessions do the reading. Free-only by default.",
       "source": "./",
       "version": "1.2.0",
       "author": {
