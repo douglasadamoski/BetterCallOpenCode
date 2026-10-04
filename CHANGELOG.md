@@ -28,6 +28,21 @@ Claude as the orchestrator, opencode models as many small workers.
 - opencode `error` events are now read: 401/403 → `AUTH`, 402/429 → `QUOTA`, 5xx → `UNREACHABLE`,
   with the provider's own message, instead of "returned no text".
 
+### Small units and a live queue
+- `kind: search | read | analyze` unit shapes: one search, or one page, with a `steps` cap that opencode
+  enforces (it forces a text-only answer after N iterations); `--steps` on `delegate.py`; each distinct
+  cap gets its own prepared mirror.
+- Output validation: a unit that "succeeds" with noise (`@user`, `.`) is treated as a failure and retried
+  on the next model. Found live: the forced end-of-steps turn can replace the answer with junk when the
+  cap leaves no spare turn, so shapes now carry one spare step.
+- `fanout.py start | add | wait | close`: a live scheduler that accepts new units while running, so the
+  orchestrator reads results as they arrive and decides the next wave. `wait` prints only what is new,
+  returns on a dead run instead of hanging, and a restarted live run gets its added units back.
+- A liveness check that sees through zombies and recycled pids (a hard-killed scheduler still answered
+  `kill -0`, so `wait` hung).
+- Live result: 15 of 16 small units done in 20 minutes at ≤2 sessions, 8 stalls all absorbed by model
+  rotation. The same research as free-form units had finished 12 of 36 after hours.
+
 ### Congestion control
 - `fanout.py` now **starts at 2 sessions** (`--start-parallel`) and adds one after `--recover-after`
   (4) clean successes, up to `--max-parallel`. It **halves on stalls, timeouts and salvaged sessions**
