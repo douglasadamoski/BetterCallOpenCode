@@ -808,3 +808,18 @@ def test_sigterm_kills_the_opencode_child_removes_the_temp_dir_and_records_the_r
     time.sleep(0.5)
     assert set(glob.glob("/tmp/bcoc.deleg.*")) - before == set(), "the run directory must be removed"
     assert stream.rows()[-1]["result"] == "INTERRUPTED" and stream.rows()[-1]["billed"] is True
+
+
+def test_steps_reaches_the_agent_config_and_a_different_value_rebuilds_the_workdir(stream):
+    wd = stream.tmp / "wsteps"
+    _run_oc(stream, "--workdir", str(wd), "--steps", "2", "--out", str(stream.tmp / "s1.md"))
+    assert json.loads((wd / "opencode.json").read_text())["agent"]["bcoc-researcher"]["steps"] == 2
+    _run_oc(stream, "--workdir", str(wd), "--steps", "2", "--out", str(stream.tmp / "s2.md"))
+    assert stream.log().count("debug agents") == 1, "same steps: reuse the verified workdir"
+    _run_oc(stream, "--workdir", str(wd), "--steps", "5", "--out", str(stream.tmp / "s3.md"))
+    assert json.loads((wd / "opencode.json").read_text())["agent"]["bcoc-researcher"]["steps"] == 5
+    assert stream.log().count("debug agents") == 2
+
+
+def test_steps_must_be_positive(stream):
+    assert _run_oc(stream, "--steps", "0") == "RESULT=BAD_ARGS"

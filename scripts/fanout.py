@@ -68,7 +68,28 @@ RETRY_WORDS = {"TIMEOUT", "ERROR", "UNREACHABLE", "QUOTA", "INTERRUPTED"}
 # Failures that say something about the MODEL/credential, not the unit.
 MODEL_FATAL = {"AUTH", "REFUSED", "PAID_BLOCKED"}
 DEFAULTS = {"role": "researcher", "backend": "opencode", "scope": None, "timeout": 900,
-            "stall_timeout": 300, "attempts": 3, "models": [], "each_model": False}
+            "stall_timeout": 300, "attempts": 3, "models": [], "each_model": False, "steps": None}
+
+# Unit SHAPES. A big unit is a long agentic loop inside one session, and that loop is where the
+# provider stalls (measured: the model turn after a tool result). These shapes are small by
+# construction — one search, or one page — and carry a `steps` cap that opencode itself enforces
+# (it forces a text-only answer after N iterations). The orchestrator composes them.
+SEARCH_PROMPT = (
+    "Run exactly ONE web search with the websearch tool for this query:\n\n{query}\n\n"
+    "Then STOP searching. Reply with a Markdown list of 5 to 8 results, one per line, in the form\n"
+    "- <title> — <URL> — <one-line snippet taken from the result>\n"
+    "Do not open any page and add no commentary. If the search fails, reply exactly: SEARCH_FAILED")
+READ_PROMPT = (
+    "Open ONLY this URL with the webfetch tool:\n\n{url}\n\nQuestion: {question}\n\n"
+    "Answer from that page alone. Quote the exact sentences that support each point, in quotation "
+    "marks, and say where on the page they are. If the page cannot be fetched or does not contain "
+    "the answer, say so plainly; never fill a gap from memory. Reply with three sections: "
+    "## Answer, ## Quotes, ## Not found.")
+KINDS = {
+    "search": {"role": "researcher", "steps": 2, "needs": ("query",)},
+    "read": {"role": "researcher", "steps": 3, "needs": ("url", "question")},
+    "analyze": {"role": "analyst", "steps": None, "needs": ("prompt",)},
+}
 TEMPLATE_RE = re.compile(r"\{\{(result|results):([A-Za-z0-9_.@\-]+)\}\}")
 
 
@@ -85,24 +106,49 @@ def slug(model: str) -> str:
 
 
 # --------------------------------------------------------------------------- spec
-def load_spec(path: Path) -> Dict[str, Any]:
+def load_spec(path: Path, allow_empty: bool = False) -> Dict[str, Any]:
     try:
         spec = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise SpecError(f"cannot read spec {path}: {e}")
-    if not isinstance(spec, dict) or not isinstance(spec.get("units"), list) or not spec["units"]:
+    if not isinstance(spec, dict) or not isinstance(spec.get("units"), list) or (not spec["units"] and not allow_empty):
         raise SpecError("spec must be an object with a non-empty 'units' list")
     return spec
 
 
-def expand(spec: Dict[str, Any], base: Path) -> List[Dict[str, Any]]:
-    """Defaults applied, prompt files read, each_model expanded, template deps added."""
-    defaults = {**DEFAULTS, **(spec.get("defaults") or {})}
+def compile_kind(u: Dict[str, Any]) -> None:
+    """Turn a unit of a known SHAPE (kind) into a role, a step cap and a prompt."""
+    kind = u.get("kind")
+    if kind is None:
+        return
+    if kind not in KINDS:
+        raise SpecError(f"unit {u['id']}: unknown kind {kind!r} (known: {', '.join(sorted(KINDS))})")
+    k = KINDS[kind]
+    for f in k["needs"]:
+        if not isinstance(u.get(f), str) or not u[f].strip():
+            raise SpecError(f"unit {u['id']}: kind {kind!r} needs {f!r}")
+    u["role"] = k["role"]
+    if u.get("steps") is None:
+        u["steps"] = k["steps"]
+    if kind == "search":
+        u["prompt"] = SEARCH_PROMPT.format(query=u["query"].strip())
+    elif kind == "read":
+        if not re.match(r"^https?://\S+$", u["url"].strip()):
+            raise SpecError(f"unit {u['id']}: 'url' must be an http(s) URL")
+        u["prompt"] = READ_PROMPT.format(url=u["url"].strip(), question=u["question"].strip())
+
+
+def expand(spec: Dict[str, Any], base: Path, known: Optional[Set[str]] = None,
+           base_defaults: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Defaults applied, prompt files read, kinds compiled, each_model expanded, template deps
+    added. `known` = ids that already exist (units added to a LIVE run may depend on them)."""
+    defaults = {**DEFAULTS, **(base_defaults or {}), **(spec.get("defaults") or {})}
     units: List[Dict[str, Any]] = []
     for raw in spec["units"]:
         if not isinstance(raw, dict) or not ID_RE.match(str(raw.get("id", ""))):
             raise SpecError(f"unit needs an id matching {ID_RE.pattern}: {raw!r:.80}")
         u = {**defaults, **raw}
+        compile_kind(u)
         models = u["models"]
         if isinstance(models, str):
             models = [models]
@@ -121,6 +167,8 @@ def expand(spec: Dict[str, Any], base: Path) -> List[Dict[str, Any]]:
         for k in ("timeout", "stall_timeout", "attempts"):
             if not isinstance(u[k], int) or u[k] < (0 if k == "stall_timeout" else 1):
                 raise SpecError(f"unit {u['id']}: {k} must be a positive integer")
+        if u.get("steps") is not None and (not isinstance(u["steps"], int) or u["steps"] < 1):
+            raise SpecError(f"unit {u['id']}: steps must be a positive integer")
         u["depends_on"] = list(u.get("depends_on") or [])
         if u.pop("each_model", False) and len(u["models"]) > 1:
             for m in u["models"]:
@@ -133,7 +181,11 @@ def expand(spec: Dict[str, Any], base: Path) -> List[Dict[str, Any]]:
     dup = [k for k, c in Counter(ids).items() if c > 1]
     if dup:
         raise SpecError(f"duplicate unit ids: {dup[:5]}")
-    known = set(ids)
+    clash = sorted(set(ids) & (known or set()))
+    if clash:
+        raise SpecError(f"unit ids already exist in this run: {clash[:5]}")
+    existing = set(known or set())
+    known = set(ids) | existing
     for u in units:
         for kind, ref in TEMPLATE_RE.findall(u["prompt"]):
             if kind == "result":
@@ -141,7 +193,7 @@ def expand(spec: Dict[str, Any], base: Path) -> List[Dict[str, Any]]:
                     raise SpecError(f"unit {u['id']}: {{{{result:{ref}}}}} names no unit")
                 u["depends_on"].append(ref)
             else:
-                hit = [i for i in ids if i.startswith(ref) and i != u["id"]]
+                hit = [i for i in sorted(known) if i.startswith(ref) and i != u["id"]]
                 if not hit:
                     raise SpecError(f"unit {u['id']}: {{{{results:{ref}}}}} matches no unit")
                 u["depends_on"] += hit
@@ -151,13 +203,13 @@ def expand(spec: Dict[str, Any], base: Path) -> List[Dict[str, Any]]:
                 raise SpecError(f"unit {u['id']}: depends_on unknown unit {d!r}")
             if d == u["id"]:
                 raise SpecError(f"unit {u['id']} depends on itself")
-    _check_acyclic(units)
+    _check_acyclic(units, existing)
     return units
 
 
-def _check_acyclic(units: List[Dict[str, Any]]) -> None:
+def _check_acyclic(units: List[Dict[str, Any]], existing: Optional[Set[str]] = None) -> None:
     deps = {u["id"]: set(u["depends_on"]) for u in units}
-    done: Set[str] = set()
+    done: Set[str] = set(existing or set())
     while deps:
         ready = [k for k, v in deps.items() if v <= done]
         if not ready:
@@ -237,6 +289,8 @@ def run_delegate(u: Dict[str, Any], model: str, prompt_path: Path, out_path: Pat
             "--prompt-file", str(prompt_path), "--out", str(out_path), "--json-out",
             "--backend", u["backend"], "--timeout", str(u["timeout"]),
             "--stall-timeout", str(u["stall_timeout"]), "--max-attempts", "1", "--cache-only", *extra]
+    if u.get("steps"):
+        argv += ["--steps", str(u["steps"])]
     if u.get("scope"):
         argv += ["--scope", str(u["scope"])]
     if workdir is not None:
@@ -300,9 +354,14 @@ class Run:
         self.not_before: Dict[str, float] = {}           # uid -> earliest retry time
         self.stop = threading.Event()
         self.cap_hit = False
+        self.live = bool(getattr(args, "live", False))
+        self.closed = False
+        self.pending: List[str] = []
+        self.last_activity = time.monotonic()
+        self.last_report = 0.0
         self.running_pids: Dict[str, int] = {}
-        self.workdirs: Dict[Tuple[str, Optional[str]], Optional[Path]] = {}
-        self.wd_events: Dict[Tuple[str, Optional[str]], threading.Event] = {}
+        self.workdirs: Dict[Tuple[str, Optional[str], Optional[int]], Optional[Path]] = {}
+        self.wd_events: Dict[Tuple[str, Optional[str], Optional[int]], threading.Event] = {}
         self.par_trace: List[Tuple[float, int]] = []
         self.t0 = time.monotonic()
         self.manifest = run_dir / "manifest.jsonl"
@@ -324,6 +383,40 @@ class Run:
                 continue
             if e.get("event") == "final" and e.get("unit") in self.units and e.get("result") in OK_WORDS:
                 self.final[e["unit"]] = e
+
+    # -- live queue ----------------------------------------------------------------------
+    def ingest_queue(self) -> int:
+        """Units appended with `fanout.py add` while this run is going. Each queue file is a list
+        of fully expanded units, written atomically by `add`; they join the pending list here."""
+        qdir = self.run_dir / "queue"
+        n = 0
+        for f in sorted(qdir.glob("*.json")) if qdir.is_dir() else []:
+            try:
+                units = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue                      # half-written or damaged: leave it, retry next tick
+            for u in units:
+                if u["id"] in self.units:
+                    continue                  # defence in depth: `add` already refuses duplicates
+                self.units[u["id"]] = u
+                self.order.append(u["id"])
+                self.pending.append(u["id"])
+                n += 1
+            (qdir / "done").mkdir(exist_ok=True)
+            f.rename(qdir / "done" / f.name)
+            self.log({"event": "added", "units": [u["id"] for u in units]})
+        if n:
+            self.last_activity = time.monotonic()
+        if (self.run_dir / "CLOSE").exists() and not self.closed:
+            self.closed = True
+            self.log({"event": "closed"})
+        return n
+
+    def live_should_wait(self) -> bool:
+        """In live mode the scheduler stays up for more units until closed or idle too long."""
+        if not self.live or self.closed or self.stop.is_set():
+            return False
+        return time.monotonic() - self.last_activity < self.args.idle_exit
 
     # -- adaptive parallelism ----------------------------------------------------------
     def on_result(self, word: str, congested: bool = False) -> None:
@@ -363,7 +456,7 @@ class Run:
         caught it)."""
         if u["backend"] != "opencode" or self.args.no_workdir:
             return None
-        key = (u["role"], str(u["scope"]) if u.get("scope") else None)
+        key = (u["role"], str(u["scope"]) if u.get("scope") else None, u.get("steps"))
         with self.lock:
             ev = self.wd_events.get(key)
             builder = ev is None
@@ -378,6 +471,8 @@ class Run:
             argv = [sys.executable, str(self.delegate), "--role", u["role"], "--model", model,
                     "--backend", "opencode", "--workdir", str(wd), "--prepare-only", "--cache-only",
                     *self.args.delegate_arg]
+            if u.get("steps"):
+                argv += ["--steps", str(u["steps"])]
             if u.get("scope"):
                 argv += ["--scope", str(u["scope"])]
             r = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=900)
@@ -434,7 +529,8 @@ class Run:
 
     def execute(self) -> None:
         self.failed: Dict[str, Dict[str, Any]] = {}
-        pending = [i for i in self.order if i not in self.final]
+        pending = self.pending
+        pending[:] = [i for i in self.order if i not in self.final]
         running: Dict[Future, str] = {}
         per_model: Counter = Counter()
         pool = ThreadPoolExecutor(max_workers=self.args.max_parallel)
@@ -442,7 +538,11 @@ class Run:
             # keep draining while anything is in flight, even after a stop: a unit that is still
             # running must be settled (recorded), not abandoned
             killed = False
-            while (pending and not self.stop.is_set()) or running:
+            while (pending and not self.stop.is_set()) or running or (self.live and self.live_should_wait()):
+                if self.live:
+                    self.ingest_queue()
+                if pending or running:
+                    self.last_activity = time.monotonic()
                 if self.stop.is_set() and not self.cap_hit and not killed:
                     # a real interrupt: do not wait for work in flight, end it now
                     killed = True
@@ -473,8 +573,8 @@ class Run:
                     fut.model = m                                   # type: ignore[attr-defined]
                     running[fut] = uid
                 if not running:
-                    if pending:
-                        time.sleep(0.2)        # waiting on a back-off, not on work
+                    if pending or self.live:
+                        time.sleep(0.2)        # waiting on a back-off, or for units to be added
                     continue
                 done, _ = wait(list(running), timeout=0.5, return_when=FIRST_COMPLETED)
                 for fut in done:
@@ -485,6 +585,9 @@ class Run:
                     except Exception as e:      # a bug in the harness must not lose the run
                         rec = {"result": "ERROR", "error": f"harness: {type(e).__name__}: {e}", "model": fut.model}  # type: ignore[attr-defined]
                     self.settle(uid, rec, pending)
+                    if self.live and time.monotonic() - self.last_report > 2.0:
+                        self.last_report = time.monotonic()
+                        write_reports(self, time.monotonic() - self.t0)     # keep INDEX/ALL_RESULTS current
         finally:
             if self.stop.is_set() and not self.cap_hit:
                 for pid in list(self.running_pids.values()):
@@ -648,7 +751,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         elif e["event"] == "final":
             state[u] = e["result"]
     c = Counter("running" if v == "running" else "retrying" if v.startswith("retrying") else v for v in state.values())
-    print(dict(c), f"· {sum(n_attempt.values())} attempts finished")
+    pid = alive(d)
+    print(dict(c), f"· {sum(n_attempt.values())} attempts finished · run "
+          f"{'ALIVE pid ' + str(pid) if pid else 'not running'} · {len(list((d / 'queue').glob('*.json')))} queued")
     for u, v in sorted(state.items()):
         if v not in OK_WORDS:
             print(f"  {u}: {v}")
@@ -659,7 +764,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     spec_path = Path(args.spec)
     try:
-        units = expand(load_spec(spec_path), spec_path.resolve().parent)
+        spec = load_spec(spec_path, allow_empty=args.live)
+        units = expand(spec, spec_path.resolve().parent)
     except SpecError as e:
         print(f"fanout: {e}", file=sys.stderr)
         print("RESULT=BAD_ARGS")
@@ -669,14 +775,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("RESULT=BAD_ARGS")
         return 0
     run_dir = Path(args.run_dir)
-    if run_dir.exists() and any(run_dir.iterdir()) and not args.resume:
+    # `start` creates run.log in the directory before launching; that alone does not make it "used"
+    if run_dir.exists() and any(e.name != "run.log" for e in run_dir.iterdir()) and not args.resume:
         print(f"fanout: {run_dir} is not empty; pass --resume to continue it, or choose a new --run-dir",
               file=sys.stderr)
         print("RESULT=BAD_ARGS")
         return 0
     (run_dir / "units").mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir, 0o700)
+    if args.resume:
+        # a live run that is restarted must get back the units that were added while it was up
+        have = {u["id"] for u in units}
+        for f in sorted((run_dir / "queue" / "done").glob("*.json")) if (run_dir / "queue" / "done").is_dir() else []:
+            try:
+                for u in json.loads(f.read_text(encoding="utf-8")):
+                    if u["id"] not in have:
+                        units.append(u)
+                        have.add(u["id"])
+            except (OSError, ValueError):
+                pass
     (run_dir / "spec.expanded.json").write_text(json.dumps(units, indent=1))
+    # the defaults units added later inherit (an added unit sees the run's own defaults first)
+    (run_dir / "defaults.json").write_text(json.dumps(spec.get("defaults") or {}, indent=1))
+    (run_dir / "queue").mkdir(exist_ok=True)
+    (run_dir / "CLOSE").unlink(missing_ok=True)
+    (run_dir / "run.pid").write_text(str(os.getpid()))
     run = Run(units, run_dir, args, Path(args.delegate))
     run.load_manifest()
     todo = [u for u in run.order if u not in run.final]
@@ -705,6 +828,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     wall = time.monotonic() - t0
     summary = write_reports(run, wall)
     run.log({"event": "run_end", **{k: summary[k] for k in ("units", "results", "wall_s")}})
+    (run_dir / "run.pid").unlink(missing_ok=True)
+    units = list(run.units.values())
     done = sum(1 for u in run.order if u in run.final)
     print(f"{done}/{len(units)} units done in {wall:.0f}s · {summary['results']} · index: {run_dir/'INDEX.md'}",
           file=sys.stderr)
@@ -719,6 +844,189 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("RESULT=PARTIAL")
     else:
         print("RESULT=ERROR")
+    return 0
+
+
+def alive(run_dir: Path) -> Optional[int]:
+    """The scheduler's pid if it is really running THIS script: not a zombie (a killed child that
+    was never reaped still answers kill -0) and not a recycled pid."""
+    try:
+        pid = int((run_dir / "run.pid").read_text().strip())
+        os.kill(pid, 0)
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        state = stat.rsplit(")", 1)[1].split()[0]
+        if state in ("Z", "X"):
+            return None
+        if "fanout.py" not in Path(f"/proc/{pid}/cmdline").read_text().replace("\0", " "):
+            return None
+        return pid
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def known_ids(run_dir: Path) -> Set[str]:
+    ids: Set[str] = set()
+    try:
+        ids |= {u["id"] for u in json.loads((run_dir / "spec.expanded.json").read_text())}
+    except (OSError, ValueError):
+        pass
+    for f in list((run_dir / "queue").glob("*.json")) + list((run_dir / "queue" / "done").glob("*.json")):
+        try:
+            ids |= {u["id"] for u in json.loads(f.read_text())}
+        except (OSError, ValueError):
+            pass
+    return ids
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Launch a LIVE run in the background and return at once; the orchestrator then adds units and
+    waits for results. The run is the same `run` code with --live."""
+    run_dir = Path(args.run_dir)
+    argv = [sys.executable, str(Path(__file__).resolve()), "run", *sys.argv[2:], "--live"]
+    # sys.argv[2:] = everything after the 'start' subcommand, flags and spec included
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log = open(run_dir / "run.log", "ab")
+    p = subprocess.Popen(argv, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(100):                      # up to 10 s for it to come up (or fail validation)
+        time.sleep(0.1)
+        if p.poll() is not None:
+            break
+        if (run_dir / "run.pid").exists() and (run_dir / "manifest.jsonl").exists():
+            break
+    if p.poll() is not None:
+        tail = (run_dir / "run.log").read_text(errors="replace")[-400:] if (run_dir / "run.log").exists() else ""
+        print(f"fanout: the run did not start:\n{tail}", file=sys.stderr)
+        print("RESULT=BAD_ARGS")
+        return 0
+    print(f"STARTED pid={p.pid} run_dir={run_dir}")
+    print("RESULT=OK")
+    return 0
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "spec.expanded.json").exists():
+        print(f"fanout: {run_dir} is not a run directory", file=sys.stderr)
+        print("RESULT=BAD_ARGS")
+        return 0
+    if alive(run_dir) is None:
+        print("fanout: that run is not alive (finished, closed or stopped); start one or use --resume", file=sys.stderr)
+        print("RESULT=BAD_ARGS")
+        return 0
+    spec_path = Path(args.spec)
+    try:
+        base_defaults = json.loads((run_dir / "defaults.json").read_text())
+        units = expand(load_spec(spec_path), spec_path.resolve().parent, known=known_ids(run_dir),
+                       base_defaults=base_defaults)
+    except (SpecError, OSError, ValueError) as e:
+        print(f"fanout: {e}", file=sys.stderr)
+        print("RESULT=BAD_ARGS")
+        return 0
+    used = ledger.cap_used_today()
+    if used is None or (used + len(units) > args.cap and not args.force):
+        print(f"fanout: adding {len(units)} units to {used} used today exceeds the cap of {args.cap}", file=sys.stderr)
+        print("RESULT=CAP")
+        return 0
+    qdir = run_dir / "queue"
+    qdir.mkdir(exist_ok=True)
+    name = f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}-{len(list(qdir.glob('*.json*')))}.json"
+    tmp = qdir / (name + ".tmp")
+    tmp.write_text(json.dumps(units))
+    tmp.rename(qdir / name)                  # atomic: the scheduler never sees a half-written file
+    print(f"queued {len(units)} unit(s): {', '.join(u['id'] for u in units[:12])}{' …' if len(units) > 12 else ''}")
+    print("RESULT=OK")
+    return 0
+
+
+def finals(run_dir: Path) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        for line in (run_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("event") == "final" and e.get("unit"):
+                out[e["unit"]] = e
+    except OSError:
+        pass
+    return out
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    """Block until something finishes, then print it — so the orchestrator reacts as results arrive.
+
+    Default: return as soon as at least one unit that has not been shown yet is final. --ids / --prefix
+    wait for those units; --all waits for the whole queue to drain. Shown units are remembered in
+    .seen.json, so repeated calls only print what is new."""
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "manifest.jsonl").exists():
+        print(f"fanout: {run_dir} has no manifest", file=sys.stderr)
+        print("RESULT=BAD_ARGS")
+        return 0
+    seen_f = run_dir / ".seen.json"
+    try:
+        seen: Set[str] = set(json.loads(seen_f.read_text()))
+    except (OSError, ValueError):
+        seen = set()
+    want_ids = [x for x in (args.ids or "").split(",") if x]
+    deadline = time.monotonic() + args.timeout
+    while True:
+        fin = finals(run_dir)
+        new = [u for u in fin if u not in seen]
+        if want_ids:
+            ok = all(u in fin for u in want_ids)
+            new = [u for u in new if u in want_ids] if not args.all_new else new
+        elif args.prefix:
+            group = [u for u in known_ids(run_dir) if u.startswith(args.prefix)]
+            ok = bool(group) and all(u in fin for u in group)
+        elif args.all:
+            ok = alive(run_dir) is None or (not list((run_dir / "queue").glob("*.json")) and
+                                              all(u in fin for u in known_ids(run_dir)))
+        else:
+            ok = bool(new)
+        dead = alive(run_dir) is None
+        if ok or dead or time.monotonic() >= deadline:
+            break
+        time.sleep(1.0)
+    shown = 0
+    for uid in sorted(new, key=lambda u: list(fin).index(u)):
+        f = fin[uid]
+        head = f"=== {uid} · {(f.get('model') or '').split('/')[-1]} · {f['result']}"
+        if f.get("secs"):
+            head += f" · {f['secs']}s"
+        if f.get("salvaged"):
+            head += " · salvaged"
+        print(head + " ===")
+        if f["result"] in OK_WORDS and not args.no_body:
+            body = unit_body(run_dir, uid)
+            print(body[:args.max_chars] + (f"\n[… {len(body) - args.max_chars} more characters in units/{uid}/result.md]" if len(body) > args.max_chars else ""))
+        elif f["result"] not in OK_WORDS:
+            print(f"(not done: {f.get('error') or f.get('reason') or f['result']})")
+        seen.add(uid)
+        shown += 1
+    seen_f.write_text(json.dumps(sorted(seen)))
+    qn = len(list((run_dir / "queue").glob("*.json")))
+    total = len(known_ids(run_dir))
+    print(f"\n[{len(finals(run_dir))}/{total} units final · {qn} queued file(s) not yet picked up · "
+          f"run {'ALIVE' if not dead else 'NOT RUNNING'}]")
+    if ok:
+        print("RESULT=OK")
+    elif dead:
+        print("RESULT=ERROR" if not shown else "RESULT=PARTIAL")
+    else:
+        print("RESULT=TIMEOUT")
+    return 0
+
+
+def cmd_close(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        print("RESULT=BAD_ARGS")
+        return 0
+    (run_dir / "CLOSE").write_text(now_iso())
+    print(f"closed: the run finishes what is queued and exits (pid {alive(run_dir) or 'not running'})")
+    print("RESULT=OK")
     return 0
 
 
@@ -745,9 +1053,35 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--retry-delay", type=float, default=1.0, help="wait before retrying any other failure")
     r.add_argument("--max-subst-chars", type=int, default=80000)
     r.add_argument("--no-workdir", action="store_true", help="build a fresh mirror per unit (slower)")
+    r.add_argument("--live", action="store_true",
+                   help="stay up after the initial units and keep accepting `fanout.py add`; ends on "
+                        "`fanout.py close` or after --idle-exit seconds with nothing to do")
+    r.add_argument("--idle-exit", type=float, default=900.0, help="live mode: seconds idle before exiting")
     r.add_argument("--delegate", default=str(SCRIPTS / "delegate.py"))
     r.add_argument("--delegate-arg", action="append", default=[], help="extra argument passed to delegate.py")
     r.set_defaults(fn=cmd_run)
+    st = sub.add_parser("start", help="start a LIVE run in the background (all `run` flags accepted)",
+                        add_help=False)
+    st.set_defaults(fn=None)
+    ad = sub.add_parser("add", help="append units to a live run")
+    ad.add_argument("run_dir")
+    ad.add_argument("spec")
+    ad.add_argument("--cap", type=int, default=int(os.environ.get("BCOPENCODE_CAP", 200) or 200))
+    ad.add_argument("--force", action="store_true")
+    ad.set_defaults(fn=cmd_add)
+    w = sub.add_parser("wait", help="block until results arrive, then print them")
+    w.add_argument("run_dir")
+    w.add_argument("--ids", help="comma list: wait until all of these are final")
+    w.add_argument("--prefix", help="wait until every unit with this id prefix is final")
+    w.add_argument("--all", action="store_true", help="wait until nothing is queued or running")
+    w.add_argument("--all-new", action="store_true", help=argparse.SUPPRESS)
+    w.add_argument("--timeout", type=float, default=300.0)
+    w.add_argument("--max-chars", type=int, default=6000, help="trim each printed result")
+    w.add_argument("--no-body", action="store_true", help="list what finished without the text")
+    w.set_defaults(fn=cmd_wait)
+    cl = sub.add_parser("close", help="tell a live run to finish and exit")
+    cl.add_argument("run_dir")
+    cl.set_defaults(fn=cmd_close)
     s = sub.add_parser("status", help="progress of a run directory")
     s.add_argument("run_dir")
     s.set_defaults(fn=cmd_status)
@@ -758,6 +1092,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["start"]:
+        # `start` takes exactly the `run` flags: parse them as `run` to validate, then launch
+        probe = build_parser().parse_args(["run", *argv[1:]])
+        sys.argv = [sys.argv[0], "start", *argv[1:]]
+        return cmd_start(probe)
     args = build_parser().parse_args(argv)
     if any(getattr(args, k, 1) < 1 for k in ("max_parallel", "per_model", "start_parallel", "min_parallel", "recover_after")):
         print("fanout: --max-parallel, --per-model, --start-parallel, --min-parallel and --recover-after must be >= 1",

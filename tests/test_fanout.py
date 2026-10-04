@@ -572,3 +572,255 @@ def test_the_default_start_is_two_and_grows(rig, monkeypatch):
     first_wave = [e for e in rig.starts() if e["t"] - rig.starts()[0]["t"] < 0.2]
     assert len(first_wave) == 2, "the run must begin with two sessions, not the ceiling"
     assert _max_concurrency(rig.events()) > 2, "and grow once units succeed"
+
+
+# ----------------------------------------------------------------------------- unit shapes and the step cap
+def test_a_search_unit_becomes_a_one_search_prompt_with_a_small_step_cap(rig):
+    sp = rig.spec([{"id": "s1", "kind": "search", "query": "OpenAlex API rate limit"}])
+    u = fo.expand(fo.load_spec(sp), rig.tmp)[0]
+    assert u["role"] == "researcher" and u["steps"] == 2
+    assert "exactly ONE web search" in u["prompt"] and "OpenAlex API rate limit" in u["prompt"] and "SEARCH_FAILED" in u["prompt"]
+
+
+def test_a_read_unit_opens_one_url_and_asks_one_question(rig):
+    sp = rig.spec([{"id": "r1", "kind": "read", "url": "https://example.org/doc", "question": "What is the limit?"}])
+    u = fo.expand(fo.load_spec(sp), rig.tmp)[0]
+    assert u["steps"] == 3 and "Open ONLY this URL" in u["prompt"] and "https://example.org/doc" in u["prompt"]
+    assert "never fill a gap from memory" in u["prompt"]
+
+
+def test_an_analyze_unit_has_no_tools_role_and_no_step_cap(rig):
+    sp = rig.spec([{"id": "a1", "kind": "analyze", "prompt": "UNIT:a1 compare"}])
+    u = fo.expand(fo.load_spec(sp), rig.tmp)[0]
+    assert u["role"] == "analyst" and u["steps"] is None
+
+
+def test_an_explicit_steps_value_beats_the_shape_default(rig):
+    u = fo.expand(fo.load_spec(rig.spec([{"id": "s", "kind": "search", "query": "q", "steps": 6}])), rig.tmp)[0]
+    assert u["steps"] == 6
+
+
+@pytest.mark.parametrize("unit,why", [
+    ({"id": "x", "kind": "nope", "query": "q"}, "unknown kind"),
+    ({"id": "x", "kind": "search"}, "needs 'query'"),
+    ({"id": "x", "kind": "read", "url": "ftp://x", "question": "q"}, "http"),
+    ({"id": "x", "kind": "read", "url": "https://x.org"}, "needs 'question'"),
+    ({"id": "x", "prompt": "p", "steps": 0}, "steps"),
+])
+def test_bad_unit_shapes_are_rejected(rig, unit, why):
+    with pytest.raises(fo.SpecError) as e:
+        fo.expand(fo.load_spec(rig.spec([unit])), rig.tmp)
+    assert why in str(e.value)
+
+
+def test_steps_reaches_delegate_and_each_distinct_cap_gets_its_own_prepared_mirror(rig):
+    units = [{"id": f"s{i}", "kind": "search", "query": f"q{i} UNIT:s{i}"} for i in range(3)] + \
+            [{"id": f"r{i}", "kind": "read", "url": "https://x.org/a", "question": f"UNIT:r{i} q"} for i in range(2)]
+    # the fake finds the unit id in the prompt via 'UNIT:<id>'; kinds embed it through the query/question
+    assert rig.run(rig.spec(units)) == "RESULT=OK"
+    caps = {e["unit"]: e for e in rig.starts()}
+    assert len(rig.starts()) == 5
+    prepares = [e for e in rig.events() if e["ev"] == "prepare"]
+    assert len(prepares) == 2, "steps=2 (search) and steps=3 (read) need two different mirrors"
+
+
+# ----------------------------------------------------------------------------- the live queue
+@pytest.fixture
+def live(rig, monkeypatch):
+    import io
+    procs = []
+
+    def cli(*argv):
+        buf = io.StringIO(); old = sys.stdout; sys.stdout = buf
+        try:
+            fo.main(list(argv))
+        finally:
+            sys.stdout = old
+        return buf.getvalue()
+
+    class L:
+        pass
+
+    l = L()
+    l.cli = cli
+    l.rd = rig.tmp / "live"
+
+    def start(*extra, units=()):
+        sp = rig.spec(list(units))
+        out = cli("start", str(sp), "--run-dir", str(l.rd), "--delegate", str(rig.tmp / "fake_delegate.py"),
+                  "--quota-backoff", "0.05", "--retry-delay", "0.02", "--cooldown", "0.05", "--start-parallel", "8",
+                  "--cap", "100000", *extra)
+        return out
+
+    l.start = start
+    l.add = lambda units, *a: (rig.spec(units), None) and cli("add", str(l.rd), str(rig.tmp / "spec.json"), *a)
+    l.wait = lambda *a: cli("wait", str(l.rd), *a)
+    l.alive = lambda: fo.alive(l.rd)
+    yield l
+    try:
+        cli("close", str(l.rd))
+    except Exception:
+        pass
+    pid = fo.alive(l.rd)
+    if pid:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def test_start_returns_at_once_with_a_live_scheduler_even_with_no_units_yet(rig, live):
+    out = live.start()
+    assert "STARTED" in out and out.strip().endswith("RESULT=OK")
+    assert live.alive() is not None
+
+
+def test_a_unit_added_to_a_running_run_is_picked_up_and_waited_for(rig, live):
+    live.start()
+    assert "queued 1 unit" in live.add([U("late1")])
+    out = live.wait("--ids", "late1", "--timeout", "30")
+    assert "=== late1" in out and "RESULT-OF-late1" in out and out.strip().endswith("RESULT=OK")
+
+
+def test_wait_only_prints_what_is_new_and_times_out_when_nothing_is(rig, live):
+    live.start()
+    live.add([U("a1")])
+    first = live.wait("--timeout", "30")
+    assert "=== a1" in first
+    second = live.wait("--timeout", "2")
+    assert "=== a1" not in second and second.strip().endswith("RESULT=TIMEOUT")
+
+
+def test_units_added_in_a_second_batch_can_use_results_of_the_first(rig, live):
+    live.start()
+    live.add([U("first")])
+    live.wait("--ids", "first", "--timeout", "30")
+    live.add([{"id": "second", "prompt": "UNIT:second use this:\n{{result:first}}"}])
+    live.wait("--ids", "second", "--timeout", "30")
+    p = (live.rd / "units" / "second" / "prompt.md").read_text()
+    assert "RESULT-OF-first" in p and "untrusted data from other models" in p
+
+
+def test_a_dependent_added_before_its_dependency_finishes_waits_for_it(rig, live, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "0.8")
+    live.start()
+    live.add([U("slow")])
+    live.add([{"id": "after", "prompt": "UNIT:after {{result:slow}}"}])
+    live.wait("--ids", "slow,after", "--timeout", "40")
+    order = [e["unit"] for e in rig.starts()]
+    assert order.index("after") > order.index("slow")
+
+
+def test_add_refuses_duplicates_unknown_dependencies_and_bad_units(rig, live, capsys):
+    live.start(units=[U("one")])
+    live.wait("--ids", "one", "--timeout", "30")
+    assert live.add([U("one")]).strip().endswith("RESULT=BAD_ARGS")
+    assert live.add([{"id": "x", "prompt": "UNIT:x", "depends_on": ["ghost"]}]).strip().endswith("RESULT=BAD_ARGS")
+    assert live.add([{"id": "y", "kind": "search"}]).strip().endswith("RESULT=BAD_ARGS")
+    assert not list((live.rd / "queue").glob("*.json")), "nothing refused may reach the queue"
+
+
+def test_add_refuses_a_run_that_is_not_alive(rig, live):
+    live.start()
+    live.cli("close", str(live.rd))
+    for _ in range(100):
+        if not live.alive():
+            break
+        time.sleep(0.1)
+    assert live.add([U("late")]).strip().endswith("RESULT=BAD_ARGS")
+
+
+def test_wait_all_returns_when_the_queue_has_drained(rig, live, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "0.2")
+    live.start()
+    live.add([U(f"u{i}") for i in range(5)])
+    out = live.wait("--all", "--timeout", "40", "--no-body")
+    assert out.count("=== u") == 5 and out.strip().endswith("RESULT=OK")
+
+
+def test_wait_prefix_waits_for_a_group(rig, live, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "0.2")
+    live.start()
+    live.add([U("g_1"), U("g_2"), U("other")])
+    out = live.wait("--prefix", "g_", "--timeout", "40", "--no-body")
+    assert "=== g_1" in out and "=== g_2" in out and out.strip().endswith("RESULT=OK")
+
+
+def test_close_lets_queued_work_finish_then_the_scheduler_exits_and_reports(rig, live, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "0.3")
+    live.start()
+    live.add([U(f"u{i}") for i in range(4)])
+    live.cli("close", str(live.rd))
+    for _ in range(150):
+        if not live.alive():
+            break
+        time.sleep(0.1)
+    assert live.alive() is None, "the scheduler must exit after close"
+    idx = (live.rd / "INDEX.md").read_text()
+    assert all(f"| u{i} |" in idx for i in range(4)), "everything queued before close still ran"
+    assert not (live.rd / "run.pid").exists()
+
+
+def test_an_idle_live_run_exits_on_its_own(rig, live):
+    live.start("--idle-exit", "2")
+    for _ in range(100):
+        if not live.alive():
+            break
+        time.sleep(0.1)
+    assert live.alive() is None
+
+
+def test_wait_on_a_dead_run_returns_instead_of_hanging(rig, live):
+    live.start()
+    pid = live.alive()
+    os.kill(pid, 9)
+    time.sleep(0.3)
+    t0 = time.time()
+    out = live.wait("--ids", "never", "--timeout", "60")
+    assert time.time() - t0 < 10 and "NOT RUNNING" in out and out.strip().endswith("RESULT=ERROR")
+
+
+def test_failed_units_are_reported_by_wait_with_their_reason(rig, live):
+    rig.behave({"bad": ["BAD_ARGS"]})
+    live.start()
+    live.add([U("bad")])
+    out = live.wait("--ids", "bad", "--timeout", "30")
+    assert "=== bad" in out and "not done" in out
+
+
+def test_the_live_scheduler_still_respects_the_parallelism_ceiling(rig, live, monkeypatch):
+    monkeypatch.setenv("FAKE_SLEEP", "0.4")
+    live.start("--max-parallel", "2", "--start-parallel", "2", "--per-model", "2")
+    live.add([U(f"u{i}") for i in range(8)])
+    live.wait("--all", "--timeout", "60", "--no-body")
+    assert _max_concurrency(rig.events()) <= 2
+
+
+def test_add_checks_the_daily_cap(rig, live):
+    live.start()
+    for _ in range(98):
+        ledger.append_row("OK", "p/m", "opencode", "researcher", True)
+    assert live.add([U("a"), U("b"), U("c")], "--cap", "100").strip().endswith("RESULT=CAP")
+    assert live.add([U("a"), U("b"), U("c")], "--cap", "100", "--force").strip().endswith("RESULT=OK")
+
+
+def test_a_restarted_live_run_gets_its_added_units_back(rig, live):
+    live.start()
+    live.add([U("kept")])
+    live.wait("--ids", "kept", "--timeout", "30")
+    live.cli("close", str(live.rd))
+    for _ in range(100):
+        if not live.alive():
+            break
+        time.sleep(0.1)
+    sp = rig.spec([])
+    out = live.cli("run", str(sp), "--run-dir", str(live.rd), "--resume", "--delegate", str(rig.tmp / "fake_delegate.py"),
+                   "--live", "--idle-exit", "1", "--start-parallel", "8", "--cap", "100000")
+    expanded = json.loads((live.rd / "spec.expanded.json").read_text())
+    assert any(u["id"] == "kept" for u in expanded)
+
+
+def test_status_shows_whether_the_run_is_alive_and_what_is_queued(rig, live, capsys):
+    live.start()
+    out = live.cli("status", str(live.rd))
+    assert "ALIVE" in out

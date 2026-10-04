@@ -131,3 +131,13 @@ def test_provider_error_events_are_read_not_ignored():
     (None, "Rate limit exceeded", "QUOTA"), (503, "upstream down", "UNREACHABLE"), (400, "bad request", "ERROR"), (None, "weird", "ERROR")])
 def test_provider_errors_map_to_the_result_vocabulary(status, msg, word):
     assert ov2.classify_provider_error({"status": status, "message": msg}) == word
+
+
+def test_steps_is_written_into_the_agent_only_when_asked_for():
+    assert "steps" not in ov2.config_for("a", True)["agent"]["a"]
+    assert ov2.config_for("a", True, steps=3)["agent"]["a"]["steps"] == 3
+
+
+def test_prepare_writes_steps_into_the_mirrors_opencode_json(tmp_path):
+    ov2.prepare(tmp_path, "bcoc-researcher", True, steps=2)
+    assert json.loads((tmp_path / "opencode.json").read_text())["agent"]["bcoc-researcher"]["steps"] == 2

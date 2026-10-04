@@ -432,7 +432,7 @@ def child_env(pid: str) -> Dict[str, str]:
 
 
 def ensure_workdir(cwd: Path, agent: str, role: str, pid: str, scope: Optional[str],
-                   major: int) -> Tuple[bool, str, List[str], Dict[str, str]]:
+                   major: int, steps: Optional[int] = None) -> Tuple[bool, str, List[str], Dict[str, str]]:
     """Make `cwd` a filtered, prepared and VERIFIED working directory for the restricted agent.
 
     -> (ok, reason, withheld files, env). On opencode 2.x the result is recorded in
@@ -445,7 +445,7 @@ def ensure_workdir(cwd: Path, agent: str, role: str, pid: str, scope: Optional[s
     v2 = major >= 2
     web = ROLES[role]["web"]
     marker = cwd / ".bcoc_ready.json"
-    key = {"agent": agent, "web": web, "version": dp.opencode_version(),
+    key = {"agent": agent, "web": web, "version": dp.opencode_version(), "steps": steps,
            "scope": str(Path(scope).resolve()) if scope else None}
     if v2:
         env.pop("OPENCODE_DISABLE_PROJECT_CONFIG", None)
@@ -474,7 +474,7 @@ def ensure_workdir(cwd: Path, agent: str, role: str, pid: str, scope: Optional[s
         # The agent is defined in an opencode.json THIS script writes into the mirror (repo-supplied
         # config is set aside), then verified with the SAME cwd and env the real run uses.
         try:
-            ov2.prepare(cwd, agent, web)
+            ov2.prepare(cwd, agent, web, steps)
         except (OSError, ValueError) as e:
             return False, f"could not prepare the mirror config: {e}", withheld, env
         ok, why = ov2.verify_v2(ov2.debug_agents(cwd, env), agent, _must_block(role, True))
@@ -529,9 +529,9 @@ def run_opencode(pid: str, model: str, role: str, prompt_text: str, a) -> Tuple[
                     fcntl.flock(lk, fcntl.LOCK_EX)
                 except OSError:
                     pass
-                ok, why, withheld, env = ensure_workdir(cwd, agent, role, pid, a.scope, major)
+                ok, why, withheld, env = ensure_workdir(cwd, agent, role, pid, a.scope, major, a.steps)
         else:
-            ok, why, withheld, env = ensure_workdir(cwd, agent, role, pid, a.scope, major)
+            ok, why, withheld, env = ensure_workdir(cwd, agent, role, pid, a.scope, major, a.steps)
         if not ok:
             if why.startswith("could not"):
                 return "ERROR", {"error": why}
@@ -671,6 +671,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="after a timeout/stall, how long the resumed session gets to write its report")
     ap.add_argument("--no-salvage", action="store_true",
                     help="do not resume a killed session to ask for a report from what it had")
+    ap.add_argument("--steps", type=int, default=None,
+                    help="opencode backend (2.x): cap the session at N agentic iterations, then force a text "
+                         "answer. Small units are the point: a session that runs long is the one that stalls.")
     ap.add_argument("--workdir", help="opencode backend: reuse this prepared+verified mirror directory "
                                       "(built on first use). Lets many units share one verification.")
     ap.add_argument("--prepare-only", action="store_true",
@@ -708,6 +711,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if a.session is not None and not SESSION_RE.match(a.session):
             raise Bad("--session must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+        if a.steps is not None and a.steps < 1:
+            raise Bad("--steps must be >= 1")
         if a.max_attempts < 1 or a.max_tokens < 1 or a.timeout < 1:
             raise Bad("--max-attempts, --max-tokens and --timeout must be positive")
         if a.backend == "opencode" and (a.image or a.pdf or a.json_mode or a.fallback):

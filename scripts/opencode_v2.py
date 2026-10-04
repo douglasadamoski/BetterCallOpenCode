@@ -76,19 +76,22 @@ def agent_permission(web: bool) -> Dict[str, Any]:
     return perm
 
 
-def config_for(agent: str, web: bool) -> Dict[str, Any]:
-    return {
-        "$schema": "https://opencode.ai/config.json",
-        "agent": {agent: {
-            "description": "BetterCallOpenCode read-only worker",
-            "mode": "primary",
-            "prompt": RESEARCH_PROMPT if web else REVIEW_PROMPT,
-            "permission": agent_permission(web),
-        }},
+def config_for(agent: str, web: bool, steps: Optional[int] = None) -> Dict[str, Any]:
+    """`steps` is opencode's own cap on agentic iterations ("before forcing text-only response").
+    Measured: with steps=2 an agent asked for five separate searches ran one, then wrote its
+    answer. It bounds how long ONE session can run, which is what the provider stalls punish."""
+    cfg: Dict[str, Any] = {
+        "description": "BetterCallOpenCode read-only worker",
+        "mode": "primary",
+        "prompt": RESEARCH_PROMPT if web else REVIEW_PROMPT,
+        "permission": agent_permission(web),
     }
+    if steps is not None:
+        cfg["steps"] = int(steps)
+    return {"$schema": "https://opencode.ai/config.json", "agent": {agent: cfg}}
 
 
-def prepare(mirror: Path, agent: str, web: bool) -> List[str]:
+def prepare(mirror: Path, agent: str, web: bool, steps: Optional[int] = None) -> List[str]:
     """Neutralise repo-supplied config, write ours. Returns the names that were set aside."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}", agent):
         raise ValueError("bad agent name")
@@ -110,7 +113,7 @@ def prepare(mirror: Path, agent: str, web: bool) -> List[str]:
                 import shutil
                 shutil.rmtree(h)
             moved.append(hidden)
-    (mirror / "opencode.json").write_text(json.dumps(config_for(agent, web), indent=2) + "\n",
+    (mirror / "opencode.json").write_text(json.dumps(config_for(agent, web, steps), indent=2) + "\n",
                                           encoding="utf-8")
     return moved
 
