@@ -363,6 +363,32 @@ python3 "$SKILL_DIR/scripts/fanout.py" run   spec.json --run-dir runs/r1 --resum
    {"id": "x_q1", "prompt": "Compare these answers…\n{{results:q1@}}"}]}  // runs after q1@*, sees their text
 ```
 
+**The loop that worked best — small units, and you react as results arrive** (`start` / `add` / `wait` / `close`):
+
+```bash
+fanout.py start spec0.json --run-dir runs/r1 --max-parallel 2        # live scheduler in the background; spec0 may have "units": []
+fanout.py add   runs/r1 wave1.json                                    # append units any time (validated first)
+fanout.py wait  runs/r1 --ids s1,s2 --timeout 420                     # blocks, prints results as they finish
+#   ...you read them, decide, then add the next wave (it may use {{result:ID}} of earlier units)...
+fanout.py close runs/r1                                               # finish what is queued, write the reports
+```
+
+Use the **unit shapes** instead of free-form prompts for web work; each is small by construction and
+carries a `steps` cap that opencode enforces:
+
+| `kind` | You give | The worker does | `steps` |
+|---|---|---|---|
+| `search` | `query` | ONE web search; returns 5–8 `title — URL — snippet` lines | 3 |
+| `read` | `url`, `question` | opens ONLY that URL; `## Answer` / `## Quotes` / `## Not found` | 4 |
+| `analyze` | `prompt` (may embed `{{results:…}}`) | no tools; compare / synthesise | – |
+
+A shape's answer is **validated** (a search must contain ≥3 URL lines, a read must have `## Answer`, any
+unit must say something); an unusable answer counts as a failure and is retried on the next model.
+Measured live (one provider, 2 sessions at a time): 4 search units in ~90 s; 8 read units + 2 compare
+units in ~15 min including 8 stall kills (75 s limit, each rescued by retrying on the other model);
+15 of 16 units done in 20 min — versus 12 of 36 in hours when each unit was a free-form research task.
+Pages that sit behind a bot challenge cannot be read; swap the URL and add another `read` unit.
+
 **Read the result like this:** `INDEX.md` (one row per unit: model, result, seconds, attempts,
 notes — read this first), then **`ALL_RESULTS.md`** (every finished unit in one file — this is
 the "see everything at once" view; compare across units here), then individual

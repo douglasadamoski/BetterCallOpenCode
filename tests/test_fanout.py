@@ -48,6 +48,12 @@ FAKE = textwrap.dedent('''\
     out = opt("--out")
     err = None if word in ("OK", "TRUNCATED") else f"fake {word}"
     body = f"RESULT-OF-{uid} by {model}: " + prompt[:60].replace(chr(10), " ")
+    if "exactly ONE web search" in prompt:
+        body += "\\n" + "\\n".join(f"- title {i} - https://example.org/{uid}/{i} - snippet {i}" for i in range(4))
+    if "Open ONLY this URL" in prompt:
+        body += "\\n## Answer\\nfine\\n## Quotes\\n(q)\\n## Not found\\nnone"
+    if os.environ.get("FAKE_JUNK") and uid in os.environ["FAKE_JUNK"].split(",") and n == 0:
+        body = "."
     open(out, "w").write("---\\nrole: researcher\\n---\\n" + (body if err is None else "> warning\\n"))
     open(out + ".json", "w").write(json.dumps({"model": model, "result": word, "error": err, "salvaged": False,
                                                  "elapsed_s": 1.0, "max_gap_s": 0.5, "withheld": []}))
@@ -578,14 +584,14 @@ def test_the_default_start_is_two_and_grows(rig, monkeypatch):
 def test_a_search_unit_becomes_a_one_search_prompt_with_a_small_step_cap(rig):
     sp = rig.spec([{"id": "s1", "kind": "search", "query": "OpenAlex API rate limit"}])
     u = fo.expand(fo.load_spec(sp), rig.tmp)[0]
-    assert u["role"] == "researcher" and u["steps"] == 2
+    assert u["role"] == "researcher" and u["steps"] == 3
     assert "exactly ONE web search" in u["prompt"] and "OpenAlex API rate limit" in u["prompt"] and "SEARCH_FAILED" in u["prompt"]
 
 
 def test_a_read_unit_opens_one_url_and_asks_one_question(rig):
     sp = rig.spec([{"id": "r1", "kind": "read", "url": "https://example.org/doc", "question": "What is the limit?"}])
     u = fo.expand(fo.load_spec(sp), rig.tmp)[0]
-    assert u["steps"] == 3 and "Open ONLY this URL" in u["prompt"] and "https://example.org/doc" in u["prompt"]
+    assert u["steps"] == 4 and "Open ONLY this URL" in u["prompt"] and "https://example.org/doc" in u["prompt"]
     assert "never fill a gap from memory" in u["prompt"]
 
 
@@ -621,7 +627,7 @@ def test_steps_reaches_delegate_and_each_distinct_cap_gets_its_own_prepared_mirr
     caps = {e["unit"]: e for e in rig.starts()}
     assert len(rig.starts()) == 5
     prepares = [e for e in rig.events() if e["ev"] == "prepare"]
-    assert len(prepares) == 2, "steps=2 (search) and steps=3 (read) need two different mirrors"
+    assert len(prepares) == 2, "steps=3 (search) and steps=4 (read) need two different mirrors"
 
 
 # ----------------------------------------------------------------------------- the live queue
@@ -824,3 +830,40 @@ def test_status_shows_whether_the_run_is_alive_and_what_is_queued(rig, live, cap
     live.start()
     out = live.cli("status", str(live.rd))
     assert "ALIVE" in out
+
+
+# ----------------------------------------------------------------------------- output validation
+@pytest.mark.parametrize("kind,body,ok", [
+    ("search", "- a - https://x.org/1 - s\n- b - https://x.org/2 - s\n- c - https://x.org/3 - s", True),
+    ("search", "SEARCH_FAILED", False),                           # too short to count as content...
+    ("search", "@user", False), ("search", ".", False),
+    ("search", "a sentence long enough but with no links at all in it, none", False),
+    ("read", "## Answer\nThe limit is 3 per second.\n## Quotes\n\"x\"\n## Not found\nn/a", True),
+    ("read", "The limit is three requests per second according to the page, I believe.", False),
+    (None, "x", False), (None, "a perfectly reasonable free-form answer with substance", True),
+    ("analyze", "short", False),
+])
+def test_validate_output(kind, body, ok):
+    assert (fo.validate_output(kind, body) is None) == ok
+
+
+def test_an_honest_search_failed_reply_is_a_valid_result_when_long_enough():
+    assert fo.validate_output("search", "SEARCH_FAILED — the tool returned no results for this query at all.") is None
+
+
+def test_a_junk_answer_is_retried_on_the_next_model_instead_of_being_accepted(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_JUNK", "s1")
+    sp = rig.spec([{"id": "s1", "kind": "search", "query": "q UNIT:s1", "models": ["p/m-a", "p/m-b"]}])
+    assert rig.run(sp) == "RESULT=OK"
+    assert [e["model"] for e in rig.starts()] == ["p/m-a", "p/m-b"], "first answer was junk: it must move on"
+    att = [e for e in rig.manifest() if e["event"] == "attempt"]
+    assert att[0]["result"] == "ERROR" and "unusable output" in att[0]["error"] and att[1]["result"] == "OK"
+
+
+def test_junk_on_every_attempt_ends_as_a_failure_not_a_success(rig, monkeypatch):
+    rig.behave({})
+    monkeypatch.setenv("FAKE_JUNK", "s1")
+    # the fake only emits junk on the first attempt; force junk always by a unit with one attempt
+    sp = rig.spec([{"id": "s1", "kind": "search", "query": "q UNIT:s1", "attempts": 1}])
+    assert rig.run(sp) == "RESULT=ERROR"
+    assert "unusable output" in (rig.run_dir / "INDEX.md").read_text()

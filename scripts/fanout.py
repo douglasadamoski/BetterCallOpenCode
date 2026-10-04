@@ -85,11 +85,34 @@ READ_PROMPT = (
     "marks, and say where on the page they are. If the page cannot be fetched or does not contain "
     "the answer, say so plainly; never fill a gap from memory. Reply with three sections: "
     "## Answer, ## Quotes, ## Not found.")
+# `steps` includes the turn that WRITES the answer: a search needs one turn for the tool call and one
+# to answer, so a cap of exactly that leaves the model no slack and the forced "maximum steps reached"
+# turn can replace the answer with noise (seen live: results of "@user" and "."). One spare each.
 KINDS = {
-    "search": {"role": "researcher", "steps": 2, "needs": ("query",)},
-    "read": {"role": "researcher", "steps": 3, "needs": ("url", "question")},
+    "search": {"role": "researcher", "steps": 3, "needs": ("query",)},
+    "read": {"role": "researcher", "steps": 4, "needs": ("url", "question")},
     "analyze": {"role": "analyst", "steps": None, "needs": ("prompt",)},
 }
+URL_LINE_RE = re.compile(r"^\s*[-*]\s+.*https?://\S+", re.M)
+
+
+def validate_output(kind: Optional[str], body: str) -> Optional[str]:
+    """Is this an answer or just noise? -> None if usable, else why not.
+
+    A model that "succeeds" with a one-character reply is not a success. Shapes know what a good
+    answer looks like; every other unit must at least say something."""
+    text = body.strip()
+    if len(re.sub(r"\s+", "", text)) < 20:
+        return f"only {len(text)} characters"
+    if kind == "search":
+        if text == "SEARCH_FAILED" or text.startswith("SEARCH_FAILED"):
+            return None                                   # an honest "nothing found" is a result
+        if len(URL_LINE_RE.findall(text)) < 3:
+            return "a search result list needs at least 3 lines with a URL"
+    elif kind == "read":
+        if "## answer" not in text.lower():
+            return "a read result must have an '## Answer' section"
+    return None
 TEMPLATE_RE = re.compile(r"\{\{(result|results):([A-Za-z0-9_.@\-]+)\}\}")
 
 
@@ -512,6 +535,13 @@ class Run:
         rec = run_delegate(u, model, pp, out, wd, self.delegate, self.args.delegate_arg, self.running_pids,
                            cap=self.args.cap)
         chars = len(unit_body(self.run_dir, uid)) if rec["result"] in OK_WORDS else 0
+        if rec["result"] in OK_WORDS:
+            bad = validate_output(u.get("kind"), unit_body(self.run_dir, uid))
+            if bad:
+                # the request was spent and the session "succeeded", but the answer is unusable:
+                # treat it as a failure so it is retried (on the next model in the pool)
+                rec = {**rec, "result": "ERROR", "error": f"unusable output: {bad}", "was": rec["result"]}
+                chars = 0
         rec = {"event": "attempt", "unit": uid, "attempt": k, "model": model, "chars": chars, **rec}
         self.log(rec)
         return rec
